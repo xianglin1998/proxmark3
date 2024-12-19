@@ -122,7 +122,12 @@ endif
 
 ## Winsock2
 ifneq (,$(findstring MINGW,$(platform)))
-	LDLIBS += -lws2_32
+
+# Webassembly(No need for ws2Lib.)
+ifndef EMSCRIPTEN
+    LDLIBS += -lws2_32
+endif
+
 endif
 
 ## Reveng
@@ -272,14 +277,21 @@ PM3INCLUDES += $(WHEREAMILIBINC)
 # but MacOSX /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld
 # doesn't recognize option --as-needed
 ifneq ($(platform),Darwin)
-    LDLIBS += -Wl,--as-needed -latomic -Wl,--no-as-needed
+
+# Webassembly(doesn't recognize option --as-needed)
+ifndef EMSCRIPTEN
+LDLIBS += -Wl,--as-needed -latomic -Wl,--no-as-needed
 endif
 
+endif
+
+# Webassembly(Using system lib)
+ifndef EMSCRIPTEN
 ## BZIP2
 LDLIBS += -lbz2
-
 ## LZ4
 LDLIBS += -llz4
+endif
 
 ## Bluez (optional)
 ifneq ($(SKIPBT),1)
@@ -425,6 +437,12 @@ MYCFLAGS += -O3
 CFLAGS ?= $(DEFCFLAGS)
 CFLAGS += $(MYDEFS) $(MYCFLAGS) $(MYINCLUDES)
 
+# To enable pthread when compile for C
+# Resolve: "wasm-ld: error: --shared-memory is disallowed by obj/mifare/aiddesfire.o because it was not compiled with 'atomics' or 'bulk-memory' features."
+ifdef EMSCRIPTEN
+    CFLAGS += -pthread
+endif
+
 # We cannot just use CFLAGS+=... because it has impact on sub-makes if CFLAGS is defined in env:
 PM3CFLAGS = $(CFLAGS)
 PM3CFLAGS += -I./src -I./include -I../include -I../common -I../common_fpga $(PM3INCLUDES) $(INCLUDES)
@@ -438,7 +456,7 @@ ifneq (,$(findstring MINGW,$(platform)))
     # FTR __USE_MINGW_ANSI_STDIO seems deprecated in Mingw32
     # but not Mingw64 https://fr.osdn.net/projects/mingw/lists/archive/users/2019-January/000199.html
     PM3CFLAGS += -D_ISOC99_SOURCE
-    PM3CFLAGS += -mno-ms-bitfields -fexec-charset=cp850
+    PM3CFLAGS += -mno-ms-bitfields # -fexec-charset=cp850 TODO 这里为了过wasm暂时改的，后面要改回来
 endif
 
 ifeq ($(READLINE_FOUND),1)
@@ -473,6 +491,11 @@ PM3CFLAGS += -DHAVE_SNPRINTF
 CXXFLAGS ?= -Wall -Werror
 CXXFLAGS += $(MYDEFS) $(MYCXXFLAGS) $(MYINCLUDES)
 
+# To enable pthread when compile for Cxx
+ifdef EMSCRIPTEN
+    MYCXXFLAGS += -pthread
+endif
+
 PM3CXXFLAGS = $(CXXFLAGS)
 PM3CXXFLAGS += -I../include -I./include
 
@@ -499,6 +522,12 @@ ifeq ($(platform),Darwin)
         # M* macOS devices return arm
         PM3LDFLAGS += -framework Foundation -framework AppKit
     endif
+endif
+
+# Webassembly(Run main on new thread, don't block WEB UI thread.)
+# https://emscripten.org/docs/porting/pthreads.html#additional-flags
+ifdef EMSCRIPTEN
+    PM3LDFLAGS += -pthread -sTOTAL_MEMORY=50331648 -sUSE_PTHREADS -sASYNCIFY
 endif
 
 ###################
@@ -888,6 +917,8 @@ lualibs/mfc_default_keys.lua : mfc_default_keys.dic
 clean:
 	$(Q)$(RM) $(CLEAN)
 	$(Q)$(RMDIR) $(OBJDIR)
+	$(Q)$(MAKE) --no-print-directory -C $(BZ2LIBPATH) clean
+	$(Q)$(MAKE) --no-print-directory -C $(LZ4LIBPATH) clean
 	$(Q)$(MAKE) --no-print-directory -C $(AMIIBOLIBPATH) clean
 	$(Q)$(MAKE) --no-print-directory -C $(CLIPARSERLIBPATH) clean
 	$(Q)$(MAKE) --no-print-directory -C $(HARDNESTEDLIBPATH) clean
