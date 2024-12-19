@@ -35,7 +35,12 @@
 #ifndef _GETOPT_H_
 #define _GETOPT_H_
 
-#include <sys/cdefs.h>
+// Don't need this inclue: https://chromium.googlesource.com/external/github.com/WebAssembly/musl/+/master/include/getopt.h
+//#include <sys/cdefs.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*
  * GNU-like getopt_long()/getopt_long_only() with 4.4BSD optreset extension.
@@ -59,7 +64,6 @@ struct option {
     int val;
 };
 
-__BEGIN_DECLS
 int getopt_long(int, char *const *, const char *,
                 const struct option *, int *);
 int getopt_long_only(int, char *const *, const char *,
@@ -75,6 +79,9 @@ extern int optind, opterr, optopt;
 #define _OPTRESET_DECLARED
 extern int optreset; /* getopt(3) external variable */
 #endif
-__END_DECLS
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* !_GETOPT_H_ */
