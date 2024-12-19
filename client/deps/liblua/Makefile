@@ -15,6 +15,11 @@ LIB_A= liblua.a
 # Transition: remove old directories and objects
 MYCLEANOLDPATH = ../../liblua
 
+# Resolve "wasm-ld: error: --shared-memory is disallowed by ?.o because it was not compiled with 'atomics' or 'bulk-memory' features."
+ifdef EMSCRIPTEN
+    MYCFLAGS += -pthread
+endif
+
 # Your platform. See PLATS for possible values.
 PLAT= none
 
