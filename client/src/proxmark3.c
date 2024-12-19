@@ -43,6 +43,9 @@
 #include <locale.h>
 #endif
 
+#if defined(EMSCRIPTEN)
+#include <emscripten/emscripten.h>
+#endif
 
 static int mainret = PM3_SUCCESS;
 
@@ -377,6 +380,38 @@ static bool pop_cmdscriptfile(void) {
         return true;
 }
 
+#if defined(__EMSCRIPTEN__)
+
+EM_JS(int, js_getchar, (void), {
+    if (Module.pending_input.length == 0) {
+      return 0;
+    }
+    return Module.pending_input.shift();
+});
+
+static char* em_fgets(char *buf, size_t size, FILE *stream) {
+    while (true) {
+        int c = js_getchar();
+        if (c != 0) {
+            if (c == '\n') {           
+                *buf = '\0';                       
+                return buf;                                                                         
+            } else {                                                                              
+                if (size == 1) {
+                *buf = '\0';
+                return buf;
+                }
+                *buf++ = c;
+                size--;
+            }                              
+            continue;
+        }
+        emscripten_sleep(100);                                                                                                                                                              
+    }
+    return NULL;
+}
+#endif
+
 // Main thread of PM3 Client
 void
 #ifdef __has_attribute
@@ -487,16 +522,29 @@ check_script:
                 if (stdinOnPipe) {
                     // clear array
                     memset(script_cmd_buf, 0, sizeof(script_cmd_buf));
+                    // Reset flag
+                    execCommand = true;
+                    stayInCommandLoop = true;
+                    fromInteractive = false;
+
+#if defined(__EMSCRIPTEN__)
+                    prompt_ctx = PROXPROMPT_CTX_INTERACTIVE;
+                    char prompt[PROXPROMPT_MAX_SIZE] = {0};
+                    prompt_compose(prompt, sizeof(prompt), prompt_ctx, prompt_dev, prompt_net, true);
+                    fprintf(stdout, "%s", prompt);
+                    fflush(stdout);
+                    fromInteractive = true;
+                    em_fgets(script_cmd_buf, sizeof(script_cmd_buf), stdin);
+#else
                     // get
                     if (fgets(script_cmd_buf, sizeof(script_cmd_buf), stdin) == NULL) {
                         PrintAndLogEx(ERR, "STDIN unexpected end, exit...");
                         break;
                     }
-                    execCommand = true;
-                    stayInCommandLoop = true;
-                    fromInteractive = false;
+#endif
                     script_cmd = script_cmd_buf;
                     script_cmd_len = strlen(script_cmd);
+
                     str_creplace(script_cmd, script_cmd_len, ';', '\0');
                     // remove linebreaks
                     str_cleanrn(script_cmd, script_cmd_len);
