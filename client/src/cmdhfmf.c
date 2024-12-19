@@ -2199,6 +2199,7 @@ jumptoend:
     return PM3_SUCCESS;
 }
 
+/* TODO 暂时注释掉
 static int CmdHF14AMfNestedHard(const char *Cmd) {
 
     CLIParserContext *ctx;
@@ -3241,6 +3242,7 @@ out:
     free(e_sector);
     return PM3_SUCCESS;
 }
+*/
 
 static int CmdHF14AMfChk_fast(const char *Cmd) {
     CLIParserContext *ctx;
@@ -10066,10 +10068,10 @@ static command_t CommandTable[] = {
     {"isen",        CmdHF14AMfISEN,         IfPm3Iso14443a,  "mfc card Info Static Encrypted Nonces"},
     {"darkside",    CmdHF14AMfDarkside,     IfPm3Iso14443a,  "Darkside attack"},
     {"nested",      CmdHF14AMfNested,       IfPm3Iso14443a,  "Nested attack"},
-    {"hardnested",  CmdHF14AMfNestedHard,   AlwaysAvailable, "Nested attack for hardened MIFARE Classic cards"},
+//    {"hardnested",  CmdHF14AMfNestedHard,   AlwaysAvailable, "Nested attack for hardened MIFARE Classic cards"},
     {"staticnested", CmdHF14AMfNestedStatic, IfPm3Iso14443a, "Nested attack against static nonce MIFARE Classic cards"},
     {"brute",       CmdHF14AMfSmartBrute,   IfPm3Iso14443a,  "Smart bruteforce to exploit weak key generators"},
-    {"autopwn",     CmdHF14AMfAutoPWN,      IfPm3Iso14443a,  "Automatic key recovery tool for MIFARE Classic"},
+//    {"autopwn",     CmdHF14AMfAutoPWN,      IfPm3Iso14443a,  "Automatic key recovery tool for MIFARE Classic"},
 //    {"keybrute",    CmdHF14AMfKeyBrute,     IfPm3Iso14443a,  "J_Run's 2nd phase of multiple sector nested authentication key recovery"},
     {"nack",        CmdHf14AMfNack,         IfPm3Iso14443a,  "Test for MIFARE NACK bug"},
     {"chk",         CmdHF14AMfChk,          IfPm3Iso14443a,  "Check keys"},

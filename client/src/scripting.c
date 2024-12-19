@@ -792,6 +792,7 @@ static int l_reveng_runmodel(lua_State *L) {
     return 1;
 }
 
+/* TODO 暂时屏蔽
 static int l_hardnested(lua_State *L) {
 
     bool haveTarget = true;
@@ -880,6 +881,7 @@ static int l_hardnested(lua_State *L) {
     lua_pushlstring(L, (const char *) dest_key, sizeof(dest_key));
     return 2; //Two return values
 }
+*/
 
 /**
  * @brief l_validate_prng is a function to test is a nonce is using the weak PRNG
@@ -1417,7 +1419,7 @@ int set_pm3_libraries(lua_State *L) {
         {"sha1",                        l_sha1},
         {"reveng_models",               l_reveng_models},
         {"reveng_runmodel",             l_reveng_runmodel},
-        {"hardnested",                  l_hardnested},
+//        {"hardnested",                  l_hardnested},
         {"detect_prng",                 l_detect_prng},
 //        {"keygen.algoA",                l_keygen_algoA},
         {"keygen_algo_b",               l_keygen_algoB},
