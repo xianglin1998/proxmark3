@@ -50,13 +50,13 @@ endif
 
 SUPPORTS_AVX512 :=  $(shell echo | $(CC) -E -mavx512f - > /dev/null 2>&1 && echo "True" )
 
-HARD_SWITCH_NOSIMD = -mno-mmx -mno-sse2 -mno-avx -mno-avx2 -DNOSIMD_BUILD
+HARD_SWITCH_NOSIMD = -fno-vectorize -fno-slp-vectorize # -mno-mmx -mno-sse2 -mno-avx -mno-avx2 -DNOSIMD_BUILD TODO 测试临时屏蔽
 HARD_SWITCH_NEON =
-HARD_SWITCH_MMX = -mmmx -mno-sse2 -mno-avx -mno-avx2
-HARD_SWITCH_SSE2 = -mmmx -msse2 -mno-avx -mno-avx2
-HARD_SWITCH_AVX = -mmmx -msse2 -mavx -mno-avx2
-HARD_SWITCH_AVX2 = -mmmx -msse2 -mavx -mavx2
-HARD_SWITCH_AVX512 = -mmmx -msse2 -mavx -mavx2 -mavx512f
+HARD_SWITCH_MMX = #-mmmx -mno-sse2 -mno-avx -mno-avx2
+HARD_SWITCH_SSE2 = #-mmmx -msse2 -mno-avx -mno-avx2
+HARD_SWITCH_AVX = #-mmmx -msse2 -mavx -mno-avx2
+HARD_SWITCH_AVX2 = #-mmmx -msse2 -mavx -mavx2
+HARD_SWITCH_AVX512 = #-mmmx -msse2 -mavx -mavx2 -mavx512f  TODO 由于SIMD的语法兼容性问题，暂时无法以此形式获得兼容，同上，暂时屏蔽
 ifeq ($(IS_SIMD_ARCH), arm64)
 	SUPPORTS_AVX512=False
 	HARD_SWITCH_NOSIMD = -DNOSIMD_BUILD
@@ -73,6 +73,11 @@ ifeq "$(SUPPORTS_AVX512)" "True"
     HARD_SWITCH_AVX += -mno-avx512f
     HARD_SWITCH_AVX2 += -mno-avx512f
     MYOBJS +=  $(MULTIARCHSRCS:%.c=$(OBJDIR)/%_AVX512.o)
+endif
+
+# Resolve "wasm-ld: error: --shared-memory is disallowed by ?.o because it was not compiled with 'atomics' or 'bulk-memory' features."
+ifdef EMSCRIPTEN
+    MYCFLAGS += -pthread
 endif
 
 include ../../../Makefile.host
