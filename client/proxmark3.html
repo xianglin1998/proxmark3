@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Proxmark3 Online</title>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" rel="stylesheet">
+    <style>
+        * {
+            padding: 0;
+            margin: 0;
+        }
+        html {
+            height: 100%;
+            width: 100%;
+        }
+        body {
+            height: 100%;
+            width: 100%;
+        }
+
+        #terminal {
+            width: 100%;
+            height: 100%;
+            padding: 16px;
+            background-color: black;
+        }
+
+    </style>
+</head>
+
+<body>
+    <!-- 画一个终端出来 -->
+    <div id="terminal"></div> 
+</body>
+<script src="proxmark3"></script>
+<script>
+    var term_input_buffer = [];  // 用于承载终端的输入的临时缓冲区
+    const term = new Terminal();
+    const fitAddon = new FitAddon.FitAddon();
+    
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal'));
+    fitAddon.fit();  // Make the terminal's size and geometry fit the size of #terminal
+
+    // replace Module
+    Module = {
+        pending_input: [],
+        preRun: function () {
+            // 保留一个空的实现，让浏览器进入异步执行的状态
+            function stdin() {
+                return 0;
+            }
+
+            function stdout(code) {
+                //console.log(String.fromCharCode(code));
+                if (code == 0x0A) {
+                    term.write("\r\n");
+                    return;
+                }
+                term.write(String.fromCharCode(code));
+            }
+
+            function stderr(code) {
+                // console.log(String.fromCharCode(code));
+                if (code == 0x0A) {
+                    term.write("\r\n");
+                    return;
+                }
+                term.write(String.fromCharCode(code));
+            }
+
+            FS.init(stdin, stdout, stderr);
+        }
+    };
+
+    // 等待WASM模块加载完成
+    Module.onRuntimeInitialized = function () {
+        console.log('WASM 模块已加载');
+    }
+
+    // 终端的输入事件
+    term.onKey((e) => {
+        console.log(e);
+        if (e.key == '\r') // 回车了，我们可以把全部的输入刷新到native层了
+        {
+            let isClearCMD = term_input_buffer[0] == 99 && term_input_buffer[1] == 108 && 
+                term_input_buffer[2] == 101 && term_input_buffer[3] == 97 && term_input_buffer[4] == 114;  // 99 108 101 97 114 = "clear"
+            if (isClearCMD) {
+                term.clear();
+                term_input_buffer.length = 0;
+                term.write("\b \b\b \b\b \b\b \b\b \b");  // 从终端回退clear五个字符
+                console.log("清空终端！");
+                return;  // just want to clear terminal
+            }
+            term.write('\r\n');
+            Array.prototype.push.apply(Module.pending_input, term_input_buffer);  // 此处就是输入数据从终端的缓冲区复制到底层的缓冲区
+            Module.pending_input.push('\n'.charCodeAt(0));  // 不要忘记添加一个换行
+            term_input_buffer.length = 0; // 清空输入缓冲区
+        } else if (e.key == '\x7F') {
+            // 仅在有输入的情况下才允许回退，避免出现将输出的消息而非输入的消息回退掉的情况
+            if (term_input_buffer.length > 0) {
+                term.write("\b \b");  // 从终端回退一个字符
+                term_input_buffer.pop();
+            }
+        } else {
+            term.write(e.key);
+            term_input_buffer.push(e.key.charCodeAt(0));
+        }
+    });
+</script>
+
+</html>
