@@ -53,6 +53,18 @@ PM3INCLUDES =
 # local libraries #
 ###################
 
+## Bzip2
+BZ2LIBPATH = ./deps/bzip2
+BZ2LIBINC = -I$(BZ2LIBPATH)
+BZ2LIB = $(BZ2LIBPATH)/libbz2.a
+BZ2LIBLD =
+
+## LZ4
+LZ4LIBPATH = ./deps/lz4
+LZ4LIBINC = -I$(LZ4LIBPATH)
+LZ4LIB = $(LZ4LIBPATH)/liblz4.a
+LZ4LIBLD =
+
 ## Amiibo
 AMIIBOLIBPATH = ./deps/amiitool
 AMIIBOLIBINC = -I$(AMIIBOLIBPATH)
@@ -144,6 +156,18 @@ MBEDTLSLIBCLIENTRELPATH = ../../client
 ########################################################
 # optional system libraries to replace local libraries #
 ########################################################
+
+## LZ4
+# not distributed as system library
+STATICLIBS += $(BZ2LIB)
+LDLIBS += $(BZ2LIBLD)
+PM3INCLUDES += $(BZ2LIBINC)
+
+## LZ4
+# not distributed as system library
+STATICLIBS += $(LZ4LIB)
+LDLIBS += $(LZ4LIBLD)
+PM3INCLUDES += $(LZ4LIBINC)
 
 ## Amiibo
 # not distributed as system library
@@ -908,6 +932,14 @@ tarbin: $(BINS)
 ###########################
 # local libraries targets #
 ###########################
+$(BZ2LIB): .FORCE
+	$(info [*] MAKE $@)
+	$(Q)$(MAKE) --no-print-directory -C $(BZ2LIBPATH) all
+
+$(LZ4LIB): .FORCE
+	$(info [*] MAKE $@)
+	$(Q)$(MAKE) --no-print-directory -C $(LZ4LIBPATH) all
+
 $(AMIIBOLIB): .FORCE
 	$(info [*] MAKE $@)
 	$(Q)$(MAKE) --no-print-directory -C $(AMIIBOLIBPATH) all
