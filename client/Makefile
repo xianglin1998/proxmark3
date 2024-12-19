@@ -602,6 +602,8 @@ POSTCOMPILE = $(MV) -f $(OBJDIR)/$*.Td $(OBJDIR)/$*.d && $(TOUCH) $@
 # enumerations #
 ################
 
+# cmdhfmfhard.c TODO SIMD需要想办法解决兼容性问题，暂时屏蔽，挪到这个位置先放着
+
 SRCS =  mifare/aiddesfire.c \
 		aidsearch.c \
 		atrs.c \
@@ -631,7 +633,6 @@ SRCS =  mifare/aiddesfire.c \
 		cmdhflto.c \
 		cmdhfmf.c \
 		cmdhfmfdes.c \
-		cmdhfmfhard.c \
 		cmdhfmfu.c \
 		cmdhfmfp.c \
 		cmdhfntag424.c \
