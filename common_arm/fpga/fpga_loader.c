@@ -289,26 +289,62 @@ static int bitparse_find_section(int bitstream_target, char section_name, uint32
 //----------------------------------------------------------------------------
 #if defined XC3 || defined PM5
 static bool FpgaConfCurrentMode(int bitstream_target) {
-    // fpga "XC3S100E" image is merged. If fpga image is no init, We need load hf_lf_allinone.bit.
-    if (downloaded_bitstream != FPGA_BITSTREAM_UNKNOWN) {
-        // gpio function setup
-        gpio_fpga_switch_setup();
+    // fpga "XC3S100E" image is merged (hf_lf_allinone.bit). A single "FPGA switch"
+    // GPIO selects the active core; on PM5 that same pin is physically linked to
+    // the ADC mux (see SetAdcMuxFor()/gpio_adc_mux_setup()). Just flipping the pin
+    // is not enough once the *other* core has been driving the antenna: the newly
+    // selected core can come up out of sync (observed: "hf" after "lf" fails until
+    // the device is unplugged/replugged, which reloads the merged image from flash).
+    //
+    // Force a clean switch instead:
+    //   field-off in the OLD core -> settle -> flip pin -> settle ->
+    //   field-off in the NEW core -> re-assert pin.
+    // 'downloaded_bitstream' still holds the previous core on entry, so the first
+    // FpgaWriteConfWord() below correctly targets the core we are leaving.
+    const int previous = downloaded_bitstream;
 
-        // try to turn off antenna
-        FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);
-
-        if (bitstream_target == FPGA_BITSTREAM_LF) {
-            Gpio_FPGA_SWITCH_Low();
-        } else {
-            Gpio_FPGA_SWITCH_High();
-        }
-        // update downloaded_bitstream
-        downloaded_bitstream = bitstream_target;
-        // turn off antenna
-        FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);
-        return true;
+#if defined XC3
+    // XC3 must have an image downloaded at least once before pin-switching works;
+    // signal the caller to perform the initial download.
+    if (previous == FPGA_BITSTREAM_UNKNOWN) {
+        return false;
     }
-    return false;
+#endif
+
+    // gpio function setup
+    gpio_fpga_switch_setup();
+
+    // turn the antenna off in the core we are leaving (skip on very first use)
+    if (previous != FPGA_BITSTREAM_UNKNOWN) {
+        FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);
+        SpinDelayUs(50);
+    }
+
+    // select the new core: LF = switch low, everything else (HF family) = switch high
+    if (bitstream_target == FPGA_BITSTREAM_LF) {
+        Gpio_FPGA_SWITCH_Low();
+    } else {
+        Gpio_FPGA_SWITCH_High();
+    }
+
+    // from here on FpgaWriteConfWord()/FpgaGetCurrent() must see the new core
+    downloaded_bitstream = bitstream_target;
+
+    // let the shared switch / ADC-mux linkage and analog path settle
+    SpinDelayUs(100);
+
+    // turn the antenna off in the newly selected core...
+    FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);
+
+    // ...and re-assert the switch line once more, so a later SetAdcMuxFor() that
+    // ran before this switch cannot leave the shared pin (and thus the core) wrong
+    if (bitstream_target == FPGA_BITSTREAM_LF) {
+        Gpio_FPGA_SWITCH_Low();
+    } else {
+        Gpio_FPGA_SWITCH_High();
+    }
+
+    return true;
 }
 #endif
 
@@ -326,7 +362,8 @@ static void FpgaDownloadAndGoEx(int bitstream_target, bool keep_em) {
 
 #if defined PM5
     // The FPGA of PM5 comes with built-in FLASH, so there is no need to download it at startup anymore.
-    downloaded_bitstream = bitstream_target; // FpgaConfCurrentMode() requires downloading for the first time, but we skipped it.
+    // Do NOT pre-set downloaded_bitstream here: FpgaConfCurrentMode() needs the previous
+    // core value so it can turn that core's field off before flipping the shared switch pin.
     FpgaConfCurrentMode(bitstream_target);
     return; // always return
 #endif
