@@ -1,6 +1,7 @@
 > **This fork branch (`pm5-f0-cep`): experimental Flipper Zero Type-C CEP for Proxmark5.**  
 > Read [`docs/F0_CEP_FLIPPER.md`](docs/F0_CEP_FLIPPER.md) first. Companion FAP: [limerx/Proxmark5_FlipperZero_FAP@f0-cep-autopwn](https://github.com/limerx/Proxmark5_FlipperZero_FAP/tree/f0-cep-autopwn).  
-> Credits: DXL / xianglin1998, RfidResearchGroup, Iceman & PM3 community. Upstream base: `proxmark5`.
+> Credits: DXL / xianglin1998, RfidResearchGroup, Iceman & PM3 community. Upstream base: `proxmark5`.  
+> Contributing: [`CONTRIBUTING.md`](CONTRIBUTING.md) · Issues enabled on this fork.
 
 # Iceman Fork - Proxmark3
 
