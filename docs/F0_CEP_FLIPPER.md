@@ -1,6 +1,6 @@
 # Proxmark5 — Flipper Zero F0 CEP (experimental)
 
-Branch of [xianglin1998/proxmark3](https://github.com/xianglin1998/proxmark3) (`proxmark5`) that **re-enables / isolates** the Flipper Zero Type-C CEP handshake and SPI NG transport so the [FAP](https://github.com/limerx/Proxmark5_FlipperZero_FAP) can leave “Connecting…”.
+Branch of [xianglin1998/proxmark3](https://github.com/xianglin1998/proxmark3) (`proxmark5`) that **re-enables / isolates** the Flipper Zero Type-C CEP handshake and SPI NG transport so the [FAP](https://github.com/limerx/Proxmark5_FlipperZero_FAP/tree/f0-cep-autopwn) can leave “Connecting…”.
 
 ## Credits
 
@@ -32,7 +32,9 @@ Before flashing, confirm the USB device is the **Proxmark5**, not the Flipper (`
 
 ## Companion FAP
 
-https://github.com/limerx/Proxmark5_FlipperZero_FAP
+https://github.com/limerx/Proxmark5_FlipperZero_FAP/tree/f0-cep-autopwn
+
+Screenshots: https://github.com/limerx/Proxmark5_FlipperZero_FAP/tree/f0-cep-autopwn/docs/screenshots
 
 ## Status
 
