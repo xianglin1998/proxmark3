@@ -93,6 +93,10 @@
 #include "spiffs.h"
 #endif
 
+#ifdef PM5
+#include "pm5_f0_cep.h"
+#endif
+
 int g_dbglevel = DBG_ERROR;
 uint8_t g_trigger = 0;
 bool g_hf_field_active = false;
@@ -3659,6 +3663,11 @@ void __attribute__((noreturn)) AppMain(void) {
     usart_init(USART_BAUD_RATE, USART_PARITY);
 #endif
 
+#ifdef PM5
+    // Experimental Flipper Zero CEP handshake (UART+SPI). Non-blocking; USB PC still works.
+    pm5_f0_cep_init();
+#endif
+
     allow_send_wtx = true;
 
     // This is made as late as possible to ensure enumeration without timeout
@@ -3678,6 +3687,10 @@ void __attribute__((noreturn)) AppMain(void) {
             hf_field_off();
             while (1);
         }
+
+#ifdef PM5
+        (void)pm5_f0_cep_poll_handshake();
+#endif
 
         // Check if there is a packet available
         PacketCommandNG rx;

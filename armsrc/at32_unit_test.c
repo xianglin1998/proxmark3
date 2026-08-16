@@ -1333,63 +1333,7 @@ void EXINT9_5_IRQHandler(void) {
 
 #include "dbprint.h"
 
-bool cep_spi_data_available(void) {
-    uint8_t len_header[2] = {0x00};
-    for (size_t i = 0; i < sizeof(len_header); ++i) {
-        uint64_t timeout = 0;
-        while (spi_i2s_flag_get(SPI1, SPI_I2S_RDBF_FLAG) == RESET) {
-            if (timeout++ > 100000) {
-                return 0; // 超时了，识别长度失败
-            }
-        }
-        len_header[i] = spi_i2s_data_receive(SPI1);
-    }
-    uint16_t data_len = (len_header[1] << 8) | len_header[0];
-    if (data_len > PM3_CMD_DATA_SIZE * 2) {
-        return false; // 无效的数据长度，大于两倍payload大小这怎么可能
-    }
-    return true;
-}
-
-// 临时实现cep端口的spi读写函数，后续可以根据实际需求完善成通用的spi读写函数，目前先这样测试互联功能
-uint32_t cep_spi_read_ng(uint8_t *data, size_t len) {
-    for (size_t i = 0; i < len; ++i) {
-        uint64_t timeout = 0;
-        while (spi_i2s_flag_get(SPI1, SPI_I2S_RDBF_FLAG) == RESET) {
-            if (timeout++ > 100000) {
-                return i; // 超时了，返回已经读取的长度
-            }
-        }
-        data[i] = spi_i2s_data_receive(SPI1);
-    }
-    return len;
-}
-
-int cep_spi_write_sync(uint8_t *data, size_t len) {
-    // 头部两个字节是数据长度，这是我们约定好的SPI通信规范，SPI的从机应答的数据的头部两个字节一定要是数据长度
-    while (spi_i2s_flag_get(SPI1, SPI_I2S_TDBE_FLAG) == RESET);
-    spi_i2s_data_transmit(SPI1, len & 0xFF);
-
-    while (spi_i2s_flag_get(SPI1, SPI_I2S_TDBE_FLAG) == RESET);
-    spi_i2s_data_transmit(SPI1, (len >> 8) & 0xFF);
-
-    // 循环发送数据
-    for (size_t i = 0; i < len; ++i) {
-        while (spi_i2s_flag_get(SPI1, SPI_I2S_TDBE_FLAG) == RESET);
-        spi_i2s_data_transmit(SPI1, data[i]);
-    }
-
-    // 让SPI电平归位为0，这是我们约定的每次通信结束后的电平状态，SPI的从机可以通过检测这个电平来判断通信是否结束
-    while (spi_i2s_flag_get(SPI1, SPI_I2S_TDBE_FLAG) == RESET);
-    spi_i2s_data_transmit(SPI1, 0x00);
-    while (spi_i2s_flag_get(SPI1, SPI_I2S_TDBE_FLAG) == RESET);
-    spi_i2s_data_transmit(SPI1, 0x00);
-
-    // 等待传输结束
-    while (spi_i2s_flag_get(SPI1, SPI_I2S_BF_FLAG) == SET);
-
-    return PM3_SUCCESS;
-}
+// cep_spi_* moved to pm5_f0_cep.c (Flipper CEP transport)
 
 void test_f0_com_by_usb_cep(void) {
 #define TEST_F0_PRINT      0

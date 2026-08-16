@@ -2466,13 +2466,13 @@ OUT:
             bar |= ((uint16_t)(found[m] & 1) << j++);
         }
 
-        uint8_t *tmp = BigBuf_calloc(480 + 10);
+        // Stack buffer: BigBuf_calloc here can fail/NULL under CEP load → hardfault (PM5 "turns off")
+        // MIX max data = 512-24 = 488; bitmap foo at 480 is enough for Classic 1K (16 sectors).
+        uint8_t tmp[488];
+        memset(tmp, 0, sizeof(tmp));
         memcpy(tmp, k_sector, sectorcnt * sizeof(sector_t));
         num_to_bytes(foo, 8, tmp + 480);
-        tmp[488] = bar & 0xFF;
-        tmp[489] = bar >> 8 & 0xFF;
-
-        reply_old(CMD_ACK, foundkeys, 0, 0, tmp, 480 + 10);
+        reply_mix(CMD_ACK, foundkeys, 0, 0, tmp, sizeof(tmp));
 
         set_tracing(false);
         FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);
