@@ -284,6 +284,7 @@ if (PM5)
     list(APPEND THUMBSRC startup_at32f435_437.s)
     list(APPEND THUMBSRC i2c.c)
     list(APPEND THUMBSRC at32_unit_test.c) # TODO DXL: AT32单元测试代码
+    list(APPEND THUMBSRC pm5_f0_cep.c) # Flipper Zero CEP handshake (experimental)
 endif ()
 
 # These are to be compiled in ARM mode

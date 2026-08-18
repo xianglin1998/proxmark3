@@ -20,6 +20,9 @@
 #include "crc16.h"
 #include "string.h"
 #include "BigBuf.h"
+#ifdef PM5
+#include "pm5_f0_cep.h"
+#endif
 
 // Flags to tell where to add CRC on sent replies
 bool g_reply_with_crc_on_usb = false;
@@ -60,22 +63,29 @@ int reply_old(uint64_t cmd, uint64_t arg0, uint64_t arg1, uint64_t arg2, const v
     }
 
     if (g_reply_via_fpc) {
-#ifdef WITH_FPC_USART_HOST
-        resultfpc = usart_writebuffer_sync((uint8_t *)&txcmd, sizeof(PacketResponseOLD));
-#else
-        return PM3_EDEVNOTSUPP;
+#ifdef PM5
+        if (pm5_f0_cep_is_ready()) {
+            resultusb = cep_spi_write_sync((uint8_t *)&txcmd, sizeof(PacketResponseOLD));
+        } else
 #endif
+        {
+#ifdef WITH_FPC_USART_HOST
+            resultfpc = usart_writebuffer_sync((uint8_t *)&txcmd, sizeof(PacketResponseOLD));
+#else
+            return PM3_EDEVNOTSUPP;
+#endif
+        }
     }
     // we got two results, let's prioritize the faulty one and USB over FPC.
     if (g_reply_via_usb && (resultusb != PM3_SUCCESS)) return resultusb;
 #ifdef WITH_FPC_USART_HOST
     if (g_reply_via_fpc && (resultfpc != PM3_SUCCESS)) return resultfpc;
 #endif
+#ifdef PM5
+    if (g_reply_via_fpc && pm5_f0_cep_is_ready() && (resultusb != PM3_SUCCESS)) return resultusb;
+#endif
     return PM3_SUCCESS;
 }
-
-// TODO DXL 测试阶段，暂时通过SPI应答
-extern int cep_spi_write_sync(uint8_t *data, size_t len);
 
 static int reply_ng_internal(uint16_t cmd, int8_t status, uint8_t reason, const uint8_t *data, size_t len, bool ng) {
     PacketResponseNGRaw txBufferNG;
@@ -104,7 +114,14 @@ static int reply_ng_internal(uint16_t cmd, int8_t status, uint8_t reason, const 
     PacketResponseNGPostamble *tx_post = (PacketResponseNGPostamble *)((uint8_t *)&txBufferNG + sizeof(PacketResponseNGPreamble) + len);
 
     // Note: if we send to both FPC & USB, we'll set CRC for both if any of them require CRC
-    if ((g_reply_via_fpc && g_reply_with_crc_on_fpc) || ((g_reply_via_usb) && g_reply_with_crc_on_usb)) {
+    // Flipper CEP: prefer MAGIC postamble (CRC mismatches on noisy SPI → silent drop → timeout)
+#ifdef PM5
+    bool cep_spi_reply = g_reply_via_fpc && pm5_f0_cep_is_ready();
+#else
+    bool cep_spi_reply = false;
+#endif
+    if (!cep_spi_reply &&
+            ((g_reply_via_fpc && g_reply_with_crc_on_fpc) || ((g_reply_via_usb) && g_reply_with_crc_on_usb))) {
         uint8_t first, second;
         compute_crc(CRC_14443_A, (uint8_t *)&txBufferNG, sizeof(PacketResponseNGPreamble) + len, &first, &second);
         tx_post->crc = ((first << 8) | second);
@@ -123,14 +140,39 @@ static int reply_ng_internal(uint16_t cmd, int8_t status, uint8_t reason, const 
         resultusb = usb_write((uint8_t *)&txBufferNG, txBufferNGLen);
     }
     if (g_reply_via_fpc) {
-
-        // TODO DXL 测试阶段，暂时通过SPI应答
-        // resultusb = cep_spi_write_sync((uint8_t *)&txBufferNG, txBufferNGLen);
-
-#ifdef WITH_FPC_USART_HOST
-        resultfpc = usart_writebuffer_sync((uint8_t *)&txBufferNG, txBufferNGLen);
+#ifdef PM5
+        // Flipper CEP: pack wire bytes (no bitfields) then SPI
+        {
+            uint8_t raw[12 + PM3_CMD_DATA_SIZE];
+            raw[0] = 0x50;
+            raw[1] = 0x4d;
+            raw[2] = 0x33;
+            raw[3] = 0x62;
+            uint16_t ln = (uint16_t)(len & 0x7FFF);
+            if (ng) {
+                ln |= 0x8000;
+            }
+            raw[4] = (uint8_t)(ln & 0xFF);
+            raw[5] = (uint8_t)((ln >> 8) & 0xFF);
+            raw[6] = (uint8_t)txBufferNG.pre.status;
+            raw[7] = (uint8_t)txBufferNG.pre.reason;
+            raw[8] = (uint8_t)(cmd & 0xFF);
+            raw[9] = (uint8_t)((cmd >> 8) & 0xFF);
+            if (len) {
+                memcpy(raw + 10, txBufferNG.data, len);
+            }
+            raw[10 + len] = (uint8_t)(RESPONSENG_POSTAMBLE_MAGIC & 0xFF);
+            raw[11 + len] = (uint8_t)((RESPONSENG_POSTAMBLE_MAGIC >> 8) & 0xFF);
+            resultusb = cep_spi_write_sync(raw, 12 + len);
+        }
 #else
-        return PM3_EDEVNOTSUPP;
+        {
+#ifdef WITH_FPC_USART_HOST
+            resultfpc = usart_writebuffer_sync((uint8_t *)&txBufferNG, txBufferNGLen);
+#else
+            return PM3_EDEVNOTSUPP;
+#endif
+        }
 #endif
     }
     // we got two results, let's prioritize the faulty one and USB over FPC.
@@ -141,6 +183,11 @@ static int reply_ng_internal(uint16_t cmd, int8_t status, uint8_t reason, const 
 #ifdef WITH_FPC_USART_HOST
     if (g_reply_via_fpc && (resultfpc != PM3_SUCCESS)) {
         return resultfpc;
+    }
+#endif
+#ifdef PM5
+    if (g_reply_via_fpc && pm5_f0_cep_is_ready() && (resultusb != PM3_SUCCESS)) {
+        return resultusb;
     }
 #endif
     return PM3_SUCCESS;
@@ -259,20 +306,64 @@ static int receive_ng_internal(PacketCommandNG *rx, uint32_t read_ng(uint8_t *da
     return PM3_SUCCESS;
 }
 
-// TODO DXL 临时在此处定义外部实现的CEP端口的SPI通信实现，做视频通信测试用的，后期需要重构设计
-// extern uint32_t cep_spi_read_ng(uint8_t *data, size_t len);
-// extern bool cep_spi_data_available(void);
-
 int receive_ng(PacketCommandNG *rx) {
+
+#ifdef PM5
+    // Flipper CEP: parse wire bytes (no bitfields — AT32/Flipper pack bool:1 differently)
+    if (cep_spi_data_available()) {
+        uint8_t pre[8];
+        if (cep_spi_read_ng(pre, sizeof(pre)) != sizeof(pre)) {
+            return PM3_EIO;
+        }
+        uint32_t magic = (uint32_t)pre[0] | ((uint32_t)pre[1] << 8) |
+                         ((uint32_t)pre[2] << 16) | ((uint32_t)pre[3] << 24);
+        uint16_t len_ng = (uint16_t)pre[4] | ((uint16_t)pre[5] << 8);
+        uint16_t cmd = (uint16_t)pre[6] | ((uint16_t)pre[7] << 8);
+        uint16_t length = (uint16_t)(len_ng & 0x7FFF);
+        bool ng = (len_ng & 0x8000) != 0;
+
+        if (magic != COMMANDNG_PREAMBLE_MAGIC) {
+            return PM3_EIO;
+        }
+        if (length > PM3_CMD_DATA_SIZE) {
+            return PM3_EOVFLOW;
+        }
+
+        uint8_t payload[PM3_CMD_DATA_SIZE];
+        if (length && cep_spi_read_ng(payload, length) != length) {
+            return PM3_EIO;
+        }
+        uint8_t post[2];
+        if (cep_spi_read_ng(post, 2) != 2) {
+            return PM3_EIO;
+        }
+
+        memset(rx, 0, sizeof(*rx));
+        rx->magic = magic;
+        rx->ng = ng;
+        rx->cmd = cmd;
+        rx->crc = (uint16_t)post[0] | ((uint16_t)post[1] << 8);
+        if (ng) {
+            memcpy(rx->data.asBytes, payload, length);
+            rx->length = length;
+        } else {
+            if (length < 24) {
+                return PM3_EIO;
+            }
+            memcpy(rx->oldarg, payload, 24);
+            memcpy(rx->data.asBytes, payload + 24, length - 24);
+            rx->length = (uint16_t)(length - 24);
+        }
+        g_reply_via_usb = false;
+        g_reply_via_fpc = true;
+        return PM3_SUCCESS;
+    }
+#endif
 
     // Check if there is a packet available
     if (usb_poll_validate_length()) {
         return receive_ng_internal(rx, usb_read_ng, true, false);
     }
-
-    // if (cep_spi_data_available()) {
-    //     return receive_ng_internal(rx, cep_spi_read_ng, false, true); // TODO DXL 临时用fpc这种标志
-    // }
 
 #ifdef WITH_FPC_USART_HOST
     // Check if there is a FPC packet available

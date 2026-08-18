@@ -1,3 +1,16 @@
+# Flipper Zero CEP (this fork branch)
+
+This default branch (`pm5-f0-cep`) adds experimental **Flipper Zero Type-C CEP** for Proxmark5.
+
+- CEP notes: [`docs/F0_CEP_FLIPPER.md`](docs/F0_CEP_FLIPPER.md)
+- Companion FAP + how to test/PR: https://github.com/limerx/Proxmark5_FlipperZero_FAP/blob/f0-cep-autopwn/CONTRIBUTING.md
+- Flash **Proxmark5 only** — never flash PM5 images onto a Flipper.
+- Open Issues here for CEP / armsrc; use the FAP repo for Flipper UI issues.
+
+The rest of this file is the upstream Proxmark3 contributor guide (coding style, etc.).
+
+---
+
 
 # Contributing to Proxmark3
 
