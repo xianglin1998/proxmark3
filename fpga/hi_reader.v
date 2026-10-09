@@ -64,7 +64,7 @@ begin
             after_hysteresis <= 1'b1;
         end
         else
-            has_been_low_for <= has_been_low_for + 1;
+            has_been_low_for <= has_been_low_for + 1'b1;
     end
 end
 
@@ -75,7 +75,7 @@ end
 // We need a 6-bit counter for the timing.
 reg [5:0] corr_i_cnt;
 always @(negedge adc_clk)
-    corr_i_cnt <= corr_i_cnt + 1;
+    corr_i_cnt <= corr_i_cnt + 1'b1;
 
 `ifdef WITH_HF_15
 reg [1:0] fskout = 2'd0;
@@ -405,7 +405,7 @@ always @(negedge adc_clk)
 begin
     if (corr_i_cnt == 6'd0)
     begin
-        jam_counter <= jam_counter + 1;
+        jam_counter <= jam_counter + 1'b1;
         jam_signal <= jam_counter[1] ^ jam_counter[3];
     end
 end

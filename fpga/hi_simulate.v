@@ -83,7 +83,7 @@ begin
         end
         else
         begin
-            has_been_low_for <= has_been_low_for + 1;
+            has_been_low_for <= has_been_low_for + 1'b1;
         end
     end
 end
@@ -93,7 +93,7 @@ end
 reg [8:0] ssp_clk_divider;
 
 always @(negedge adc_clk)
-    ssp_clk_divider <= (ssp_clk_divider + 1);
+    ssp_clk_divider <= (ssp_clk_divider + 1'b1);
 
 always @(negedge adc_clk)
 begin

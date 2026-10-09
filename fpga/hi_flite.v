@@ -105,7 +105,7 @@ reg zero = 1'b0; // Manchester first halfbit low second high corresponds to this
 reg [8:0] ssp_cnt = 9'd0;
 
 always @(posedge adc_clk)
-    ssp_cnt <= (ssp_cnt + 1);
+    ssp_cnt <= (ssp_cnt + 1'b1);
 
 //maybe change it so that ARM sends preamble as well.
 //then: ready bits sent to ARM, 8 bits sent from ARM (all ones), then preamble (all zeros, presumably) - which starts modulation
@@ -169,7 +169,7 @@ begin
             if (power)
                 bit_counts <= 0;
             else
-                bit_counts <= bit_counts + 1;
+                bit_counts <= bit_counts + 1'b1;
     end
     else
     begin
@@ -179,7 +179,7 @@ begin
         end
         else
         begin
-            fccount <= fccount + 1;
+            fccount <= fccount + 1'b1;
         end
     end
 
@@ -271,7 +271,7 @@ begin
                 mid <= 8'd128;
             end
             else
-                tsinceedge <= (tsinceedge + 1);
+                tsinceedge <= (tsinceedge + 1'b1);
         end
     end
 
@@ -320,18 +320,18 @@ begin
             begin
                 // minimum-maximum calc
                 if(adc_d > curmaxthres)
-                    mid <= mid + 1;
+                    mid <= mid + 1'b1;
                 else if (adc_d < curminthres)
-                    mid <= mid - 1;
+                    mid <= mid - 1'b1;
                 else
                     begin
                         if (after_hysteresis)
                         begin
-                            mid <= mid + 1;
+                            mid <= mid + 1'b1;
                         end
                         else
                         begin
-                            mid <= mid - 1;
+                            mid <= mid - 1'b1;
                         end
                     end
             end

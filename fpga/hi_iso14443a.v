@@ -70,7 +70,7 @@ begin
         end
         else
         begin
-            has_been_low_for <= has_been_low_for + 1;
+            has_been_low_for <= has_been_low_for + 1'b1;
         end
     end
 
@@ -94,7 +94,7 @@ begin
             saw_deep_modulation <= 8'd0;
         end
         else
-            deep_counter <= deep_counter + 1;
+            deep_counter <= deep_counter + 1'b1;
     end
     else
     begin
@@ -102,7 +102,7 @@ begin
         if(saw_deep_modulation == 8'd255)               // adc_d != 0 for 256 adc_clk ticks -> deep_modulation is over, probably waiting for tag's response
             deep_modulation <= 1'b0;
         else
-            saw_deep_modulation <= saw_deep_modulation + 1;
+            saw_deep_modulation <= saw_deep_modulation + 1'b1;
     end
 end
 
@@ -153,7 +153,7 @@ begin
     begin
         if (reader_falling_edge_time == 4'd1)           // reader signal changes right after sampling. Better sample earlier next time.
         begin
-            negedge_cnt <= negedge_cnt + 2;             // time warp
+            negedge_cnt <= negedge_cnt + 2'd2;             // time warp
         end
         else if (reader_falling_edge_time == 4'd0)      // reader signal changes right before sampling. Better sample later next time.
         begin
@@ -161,7 +161,7 @@ begin
         end
         else
         begin
-            negedge_cnt <= negedge_cnt + 1;             // Continue as usual
+            negedge_cnt <= negedge_cnt + 1'b1;             // Continue as usual
         end
         reader_falling_edge_time[3:0] <= 4'd8;          // adjust only once per detected edge
     end
@@ -171,7 +171,7 @@ begin
     end
     else
     begin
-        negedge_cnt <= negedge_cnt + 1;
+        negedge_cnt <= negedge_cnt + 1'b1;
     end
 end
 
@@ -341,12 +341,12 @@ begin
             end
             else
             begin
-                sub_carrier_cnt <= sub_carrier_cnt + 1;
+                sub_carrier_cnt <= sub_carrier_cnt + 1'b1;
             end
         end
         else
         begin
-            fdt_counter <= fdt_counter + 1;
+            fdt_counter <= fdt_counter + 1'b1;
         end
     end
 
@@ -407,7 +407,7 @@ begin
                 if (mod_sig_ptr == 5'd31)
                     mod_sig_ptr <= 5'd0;                                        // buffer overflow - data loss.
                 else
-                    mod_sig_ptr <= mod_sig_ptr + 1;                             // increase buffer (= increase delay by 16 adc_clk ticks). mod_sig_ptr always points ahead of first 1.
+                    mod_sig_ptr <= mod_sig_ptr + 1'b1;                          // increase buffer (= increase delay by 16 adc_clk ticks). mod_sig_ptr always points ahead of first 1.
             else if(fdt_elapsed && ~temp_buffer_reset)
             begin
                 // wait for the next 1 after fdt_elapsed before fixing the delay and starting modulation. This ensures that the response can only happen
@@ -417,7 +417,7 @@ begin
                 if(mod_sig_ptr == 5'd1)
                     mod_sig_ptr <= 5'd8;                                        // still nothing received, need to go for the next interval
                 else
-                    mod_sig_ptr <= mod_sig_ptr - 1;                             // decrease buffer.
+                    mod_sig_ptr <= mod_sig_ptr - 1'b1;                          // decrease buffer.
             end
         end
     end

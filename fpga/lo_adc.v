@@ -84,7 +84,7 @@ begin
     end
     else
     begin
-        pck_divider <= pck_divider + 1;
+        pck_divider <= pck_divider + 1'd1; // Increments by 1 on each rising edge of sspclk.
     end
 end
 

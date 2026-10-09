@@ -29,7 +29,7 @@ module hi_get_trace(
 reg [6:0] clock_cnt;
 always @(negedge ck_1356megb)
 begin
-    clock_cnt <= clock_cnt + 1;
+    clock_cnt <= clock_cnt + 1'b1;
 end
 
 // sample at 13,56MHz / 8. The highest signal frequency (subcarrier) is 848,5kHz, i.e. in this case we oversample by a factor of 2
@@ -39,7 +39,7 @@ begin
     if (sample_clock == 3'd7)
         sample_clock <= 3'd0;
     else
-        sample_clock <= sample_clock + 1;
+        sample_clock <= sample_clock + 1'b1;
 end
 
 
@@ -62,7 +62,7 @@ begin
             if (addr == 12'd3071)
                 addr <= 12'd0;
             else
-                addr <= addr + 1;
+                addr <= addr + 1'b1;
         end
     end
     else if (major_mode != `FPGA_MAJOR_MODE_OFF)
@@ -89,7 +89,7 @@ begin
                 end
                 else
                 begin
-                    addr <= addr + 1;
+                    addr <= addr + 1'b1;
                 end
             end
         end
