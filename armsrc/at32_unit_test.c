@@ -1905,6 +1905,168 @@ void test_nvic_reset(void) {
 #define SMARTCARD_SYNC_TEST 0
 #endif
 
+#if !SMARTCARD_SYNC_TEST
+// ---------------------------------------------------------------------------
+// ISO7816 T=0（异步卡）最小收发实现
+// 这张社保卡的 ATR 里没有 TD1，按 ISO7816-3 默认走 T=0。
+// T=0 的特点：发完 5 字节命令头后，卡片会先回一个 procedure byte，
+//   0x60      = NULL，继续等
+//   INS       = ACK，接受后续所有数据（或表示数据开始输出）
+//   ~INS      = ACK，只接受下一个数据字节
+//   0x6C xx   = Le 不对，用 xx 重发命令头
+//   0x61 xx   = 还有 xx 字节，需要发 GET RESPONSE 取回
+//   其它 6X/9X = SW1，随后跟 SW2，本次交换结束
+// 时序基准：GetTicks() 为 1.5MHz（StartTicks 已在上层调用），30ms = 45000 ticks
+// ---------------------------------------------------------------------------
+
+// 发出一个字符：先等发送缓冲空，发完再等 TDC 确认该字符已经完整移出到 I/O 线上。
+// 只等 TDBE 是不够的：TDBE 只表示数据寄存器空，半双工方向切换过早会把最后几位切掉。
+static bool sc_t0_send_byte(uint8_t b) {
+    uint32_t start = GetTicks();
+    while (usart_flag_get(USART2, USART_TDBE_FLAG) == RESET) {
+        if (GetTicksDelta(start) > 15000) { // 10ms
+            return false;
+        }
+    }
+    usart_data_transmit(USART2, b);
+
+    start = GetTicks();
+    while (usart_flag_get(USART2, USART_TDC_FLAG) == RESET) {
+        if (GetTicksDelta(start) > 15000) { // 10ms，一个字符约 1ms
+            return false;
+        }
+    }
+    usart_flag_clear(USART2, USART_TDC_FLAG);
+    return true;
+}
+
+// 接收一个字符，超时返回 false。
+// ISO7816 T=0 的 work waiting time 默认是 960 etu，9677bps 下约 100ms，
+// 所以这里必须给足余量，30ms 对部分卡片偏短（会把正常的处理延迟误判成无响应）。
+static bool sc_t0_recv_byte(uint8_t *b) {
+    uint32_t start = GetTicks();
+    while (usart_flag_get(USART2, USART_RDBF_FLAG) == RESET) {
+        if (GetTicksDelta(start) > 225000) { // 150ms
+            return false;
+        }
+    }
+    *b = (uint8_t) usart_data_receive(USART2);
+    return true;
+}
+
+// 发一条 APDU 并把应答数据读进 out。返回 SW（0x9000 正常），0xFFFF 表示通讯超时/异常。
+static uint16_t sc_t0_apdu(uint8_t cla, uint8_t ins, uint8_t p1, uint8_t p2,
+                           const uint8_t *in, uint8_t lc, uint8_t le,
+                           uint8_t *out, uint16_t out_max, uint16_t *out_len) {
+    uint8_t  cur_ins = ins;
+    uint8_t  rx;
+    uint8_t  sw2;
+    uint8_t  sent = 0;
+    uint16_t n = 0;
+    uint16_t remain = le; // 还需要从卡片读回的字节数
+    uint16_t guard;
+
+    *out_len = 0;
+
+    // 丢掉之前残留的字节
+    while (usart_flag_get(USART2, USART_RDBF_FLAG) != RESET) {
+        (void) usart_data_receive(USART2);
+    }
+
+    // 命令头：P3 有数据时是 Lc，否则是 Le
+    if (!sc_t0_send_byte(cla) || !sc_t0_send_byte(ins) || !sc_t0_send_byte(p1) ||
+            !sc_t0_send_byte(p2) || !sc_t0_send_byte(lc ? lc : le)) {
+        return 0xFFFF;
+    }
+
+    for (guard = 0; guard < 1000; ++guard) {
+        if (!sc_t0_recv_byte(&rx)) {
+            // MUX 模式下 GPIOA->idt 仍反映引脚真实电平：
+            //   1 = 总线空闲高（卡片没回应，命令可能没送到）
+            //   0 = 卡片正拉着总线低（卡片在输出，但我们没收到 -> 波特率/校验位不匹配）
+            dxl_print_dbg("    RX timeout: I/O=%d sts=0x%03x (PERR=%d FERR=%d NERR=%d ROVER=%d)\n",
+                          GpioInputStatus(GPIOA, GPIO_PINS_2), (unsigned) USART2->sts,
+                          (USART2->sts & USART_PERR_FLAG) ? 1 : 0,
+                          (USART2->sts & USART_FERR_FLAG) ? 1 : 0,
+                          (USART2->sts & USART_NERR_FLAG) ? 1 : 0,
+                          (USART2->sts & USART_ROERR_FLAG) ? 1 : 0);
+            return 0xFFFF;
+        }
+
+        if (rx == 0x60) { // NULL
+            continue;
+        }
+
+        // 送数据阶段：卡片 ACK 后再送数据
+        if (sent < lc && (rx == cur_ins || rx == (uint8_t) ~cur_ins)) {
+            uint8_t cnt = (rx == cur_ins) ? (uint8_t)(lc - sent) : 1;
+            while (cnt-- > 0 && sent < lc) {
+                if (!sc_t0_send_byte(in[sent++])) {
+                    return 0xFFFF;
+                }
+            }
+            continue;
+        }
+
+        // 数据开始输出：按 Le 收满，再接着读 SW
+        if (remain > 0 && rx == cur_ins) {
+            while (remain > 0) {
+                if (!sc_t0_recv_byte(&rx)) {
+                    return 0xFFFF;
+                }
+                if (n < out_max) {
+                    out[n++] = rx;
+                }
+                remain--;
+            }
+            *out_len = n;
+            continue;
+        }
+
+        // 卡片说还有数据，发 GET RESPONSE 把它取回来
+        if (rx == 0x61) {
+            uint8_t more;
+            if (!sc_t0_recv_byte(&more)) {
+                return 0xFFFF;
+            }
+            if (!sc_t0_send_byte(cla) || !sc_t0_send_byte(0xC0) || !sc_t0_send_byte(0x00) ||
+                    !sc_t0_send_byte(0x00) || !sc_t0_send_byte(more)) {
+                return 0xFFFF;
+            }
+            cur_ins = 0xC0;
+            sent = lc;   // GET RESPONSE 没有数据段
+            remain = more;
+            continue;
+        }
+
+        // Le 不对：按卡片要求换长度重发命令头
+        if (rx == 0x6C && lc == 0) {
+            uint8_t want;
+            if (!sc_t0_recv_byte(&want)) {
+                return 0xFFFF;
+            }
+            if (!sc_t0_send_byte(cla) || !sc_t0_send_byte(cur_ins) || !sc_t0_send_byte(p1) ||
+                    !sc_t0_send_byte(p2) || !sc_t0_send_byte(want)) {
+                return 0xFFFF;
+            }
+            remain = want;
+            continue;
+        }
+
+        // 剩下的都是 SW1
+        if (!sc_t0_recv_byte(&sw2)) {
+            return 0xFFFF;
+        }
+        *out_len = n;
+        return ((uint16_t) rx << 8) | sw2;
+    }
+
+    *out_len = n;
+    return 0xFFFF;
+}
+
+#endif
+
 void test_smartcard_module(void) {
     // 初始化I2C，等下需要拿来做状态切换
     StartTicks();
@@ -1958,11 +2120,43 @@ void test_smartcard_module(void) {
     gpio_pin_mux_config(GPIOA, GPIO_PINS_SOURCE3, GPIO_MUX_1);
 
     // ISO7816 default F/D=372: 3.6 MHz / 372 ~= 9677 baud.
+    // SC_USE_SC_MODE=1 用 AT32 的 SmartCard 模式（1.5 停止位 + guard time）；
+    // 某些硅片版本上 SCEN 与单线半双工(HDSEL) 同时打开会导致 TX 不出波形，
+    // 此时把它改成 0：改用普通 9bit(8数据+偶校验) + 2 停止位，等效 1 停止位 + 1 保护位。
+// 实测结论：AT32 上 SCEN（SmartCard 模式）与 SLBEN（单线半双工）同时打开时，
+// TX 完全不上线——TDC 会置位但引脚电平零变化，波形被外设屏蔽。
+// 所以默认关闭 SCEN：用普通 9bit(8 数据 + 偶校验) + 2 停止位，
+// 等效 ISO7816 的 1 停止位 + 1 保护位，T=0 完全够用。
+#ifndef SC_USE_SC_MODE
+#define SC_USE_SC_MODE 0
+#endif
+#if SC_USE_SC_MODE
     usart_init(USART2, 9677, USART_DATA_9BITS, USART_STOP_1_5_BIT);
+#else
+    usart_init(USART2, 9677, USART_DATA_9BITS, USART_STOP_2_BIT);
+#endif
     usart_parity_selection_config(USART2, USART_PARITY_EVEN);
+
+    // 硬件自动 NACK 默认关闭。
+    // 单线半双工下自己发出的字符会回灌到自己的接收器，硬件容易把它判成校验错误，
+    // 于是在总线上自动发 NACK 去打断卡片；T=0 的字符重复本来是可选的，
+    // 交给软件状态机处理（超时/0x60/0x6C）更安全。
+#ifndef SC_HW_NACK
+#define SC_HW_NACK 1
+#endif
+
+    // TC1=0x00 表示 N=0，最小保护时间；这里留 2 etu 余量，对 T=0 足够安全。
     usart_smartcard_guard_time_set(USART2, 2);
+#if SC_USE_SC_MODE
     usart_smartcard_mode_enable(USART2, TRUE);
+#else
+    usart_smartcard_mode_enable(USART2, FALSE);
+#endif
+#if SC_HW_NACK
     usart_smartcard_nack_set(USART2, TRUE);
+#else
+    usart_smartcard_nack_set(USART2, FALSE);
+#endif
     usart_single_line_halfduplex_select(USART2, TRUE);
     usart_transmitter_enable(USART2, TRUE);
     usart_receiver_enable(USART2, TRUE);
@@ -2357,16 +2551,22 @@ void test_smartcard_module(void) {
         data[0] = 1;
         ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
 
-        // 读取ATR数据
+        // 读取 ATR：ATR 结束的标志是总线上出现空闲，这里用 20ms 无数据判定结束，
+        // 这样不用按键也能自动进入后面的 APDU 交互测试；按键只是提前结束。
         atr_len = 0;
+        uint32_t atr_idle = GetTicks();
         while (1) {
             if (usart_flag_get(USART2, USART_RDBF_FLAG) != RESET) {
-                uint8_t rx_data = usart_data_receive(USART2);
+                uint8_t rx_data = (uint8_t) usart_data_receive(USART2);
                 if (atr_len < sizeof(atr)) {
                     atr[atr_len++] = rx_data;
                 }
+                atr_idle = GetTicks();
+                continue;
             }
-
+            if (GetTicksDelta(atr_idle) > 30000) { // 20ms 空闲，ATR 结束
+                break;
+            }
             if (is_btn_pressed()) {
                 break;
             }
@@ -2376,6 +2576,282 @@ void test_smartcard_module(void) {
             dxl_print_dbg(" %02x", atr[i]);
         }
         dxl_print_dbg("\n");
+
+        // ---- 链路自检：ATR 期间可能累积了帧错误/噪声/接收溢出标志 ----
+        // ROVER（接收溢出）不清会让后续字符全部被丢弃，表现正是"ATR 正常但 APDU 全无响应"。
+        dxl_print_dbg("UART sts after ATR = 0x%03x (PERR=%d FERR=%d NERR=%d ROVER=%d), I/O=%d\n",
+                      (unsigned) USART2->sts,
+                      (USART2->sts & USART_PERR_FLAG) ? 1 : 0,
+                      (USART2->sts & USART_FERR_FLAG) ? 1 : 0,
+                      (USART2->sts & USART_NERR_FLAG) ? 1 : 0,
+                      (USART2->sts & USART_ROERR_FLAG) ? 1 : 0,
+                      GpioInputStatus(GPIOA, GPIO_PINS_2));
+        usart_flag_clear(USART2, USART_PERR_FLAG | USART_FERR_FLAG |
+                         USART_NERR_FLAG | USART_ROERR_FLAG | USART_TDC_FLAG);
+        while (usart_flag_get(USART2, USART_RDBF_FLAG) != RESET) {
+            (void) usart_data_receive(USART2); // 丢掉 ATR 尾部残留
+        }
+        SpinDelay(50); // 400 etu 约 41ms，等足卡片进入接收状态（T=0 规定值）
+
+        // ================= 物理层自检 =================
+        // 目的：区分"USART 说发完了"和"引脚上真的有波形"。
+        // 做法：本机就是 I/O 的主人，直接把 PA2 拽成 GPIO 输出，再回头读 idt 看电平。
+        gpio_init_struct.gpio_mode = GPIO_MODE_OUTPUT;
+        gpio_init_struct.gpio_out_type = GPIO_OUTPUT_OPEN_DRAIN;
+        gpio_init_struct.gpio_pins = GPIO_PINS_2;
+        gpio_init_struct.gpio_pull = GPIO_PULL_UP;
+        gpio_init(GPIOA, &gpio_init_struct);
+
+        gpio_bits_set(GPIOA, GPIO_PINS_2);       // 释放，靠上拉
+        SpinDelayUsPrecision(20);
+        uint8_t io_released = GpioInputStatus(GPIOA, GPIO_PINS_2);
+        gpio_bits_reset(GPIOA, GPIO_PINS_2);     // 主动拉低
+        SpinDelayUsPrecision(20);
+        uint8_t io_driven_low = GpioInputStatus(GPIOA, GPIO_PINS_2);
+        gpio_bits_set(GPIOA, GPIO_PINS_2);       // 立刻释放，20us < 1 etu，卡片只会当毛刺
+        SpinDelayUsPrecision(20);
+        uint8_t io_back_high = GpioInputStatus(GPIOA, GPIO_PINS_2);
+
+        dxl_print_dbg("IO line test: released=%d driven_low=%d back_high=%d -> %s\n",
+                      io_released, io_driven_low, io_back_high,
+                      (io_driven_low == 0 && io_back_high == 1)
+                      ? "PA2 can drive the card I/O line"
+                      : "PA2 CANNOT drive the line - wrong pin / buffered path");
+
+        // 恢复 USART 复用，准备用真实 USART 发送
+        gpio_init_struct.gpio_mode = GPIO_MODE_MUX;
+        gpio_init_struct.gpio_out_type = GPIO_OUTPUT_OPEN_DRAIN;
+        gpio_init_struct.gpio_pins = GPIO_PINS_2;
+        gpio_init_struct.gpio_pull = GPIO_PULL_UP;
+        gpio_init(GPIOA, &gpio_init_struct);
+        gpio_pin_mux_config(GPIOA, GPIO_PINS_SOURCE2, GPIO_MUX_7);
+
+        while (usart_flag_get(USART2, USART_RDBF_FLAG) != RESET) {
+            (void) usart_data_receive(USART2);
+        }
+
+        // ============ TX 上线探针（可选诊断，默认关闭） ============
+        // 上面的初始化已经用实测可用的 SCEN=0/HDSEL=1/2 停止位，
+        // 所以正常测试不需要再探测。需要重新排查 TX 时把 SC_TX_PROBE 改成 1，
+        // 它会遍历几种 SCEN/HDSEL/停止位/时钟输出 的组合，找出真正能出波形的那个。
+#ifndef SC_TX_PROBE
+#define SC_TX_PROBE 0
+#endif
+        int8_t tx_ok_cfg = 0; // 探针关闭时假定当前配置可用
+#if SC_TX_PROBE
+        tx_ok_cfg = -1;
+        int8_t tx_any_cfg = -1;
+
+        // SCEN 与 SLBEN 只能在 UEN=0 时改，所以每次都先关 USART 再改再开。
+        static const struct {
+            uint8_t scmen, slben, stopbn, clken, usable;
+            const char *label;
+        } tx_cfgs[] = {
+            {0, 1, USART_STOP_2_BIT,   0, 1, "SCEN=0 HDSEL=1 2stop"},
+            {1, 1, USART_STOP_1_5_BIT, 1, 1, "SCEN=1 HDSEL=1 CKout"},
+            {1, 1, USART_STOP_1_5_BIT, 0, 1, "SCEN=1 HDSEL=1"},
+            {0, 0, USART_STOP_2_BIT,   0, 0, "SCEN=0 HDSEL=0 (仅诊断)"},
+        };
+
+        for (size_t c = 0; c < sizeof(tx_cfgs) / sizeof(tx_cfgs[0]); ++c) {
+            usart_enable(USART2, FALSE);
+            usart_smartcard_mode_enable(USART2, tx_cfgs[c].scmen ? TRUE : FALSE);
+            usart_single_line_halfduplex_select(USART2, tx_cfgs[c].slben ? TRUE : FALSE);
+            usart_smartcard_nack_set(USART2, FALSE);
+            USART2->ctrl2_bit.stopbn = tx_cfgs[c].stopbn;
+            usart_transmitter_enable(USART2, TRUE);
+            usart_receiver_enable(USART2, TRUE);
+            usart_clock_enable(USART2, tx_cfgs[c].clken ? TRUE : FALSE);
+            usart_enable(USART2, TRUE);
+            SpinDelay(2);
+
+            while (usart_flag_get(USART2, USART_RDBF_FLAG) != RESET) {
+                (void) usart_data_receive(USART2);
+            }
+            usart_flag_clear(USART2, USART_TDC_FLAG);
+
+            uint32_t tx_low = 0;
+            uint32_t tx_high = 0;
+            uint32_t tx_t0 = GetTicks();
+            usart_data_transmit(USART2, 0x00);
+            // 5ms 采样窗口：一个字符约 1.1ms，SC 模式的 guard time 可能推迟发送
+            while (GetTicksDelta(tx_t0) < 7500) {
+                if (GpioInputStatus(GPIOA, GPIO_PINS_2)) {
+                    ++tx_high;
+                } else {
+                    ++tx_low;
+                }
+            }
+            dxl_print_dbg("TX probe [%s]: low=%u high=%u TDC=%d -> %s\n",
+                          tx_cfgs[c].label, (unsigned) tx_low, (unsigned) tx_high,
+                          (usart_flag_get(USART2, USART_TDC_FLAG) != RESET) ? 1 : 0,
+                          (tx_low > 0) ? "TX OK" : "no TX on pin");
+
+            if (tx_low > 0) {
+                if (tx_cfgs[c].usable) {
+                    tx_ok_cfg = (int8_t) c;
+                    break;
+                }
+                if (tx_any_cfg < 0) {
+                    tx_any_cfg = (int8_t) c;
+                }
+            }
+        }
+
+        if (tx_ok_cfg >= 0) {
+            dxl_print_dbg("TX/SRX config selected: %s\n", tx_cfgs[tx_ok_cfg].label);
+        } else {
+            dxl_print_dbg("NO half-duplex config produces TX on PA2.\n");
+            if (tx_any_cfg >= 0) {
+                dxl_print_dbg("  TX works only with %s => AF output itself is fine,\n"
+                              "  HDSEL/SCEN masks the TX output.\n",
+                              tx_cfgs[tx_any_cfg].label);
+            } else {
+                dxl_print_dbg("  TX never reaches PA2 => USART2 TX mux/pin mapping is wrong.\n");
+            }
+            // 恢复成 HDSEL=1 + SCEN=0，至少保证 RX 与后续 APDU 仍可尝试
+            usart_enable(USART2, FALSE);
+            usart_smartcard_mode_enable(USART2, FALSE);
+            usart_single_line_halfduplex_select(USART2, TRUE);
+            USART2->ctrl2_bit.stopbn = USART_STOP_2_BIT;
+            usart_transmitter_enable(USART2, TRUE);
+            usart_receiver_enable(USART2, TRUE);
+            usart_clock_enable(USART2, FALSE);
+            usart_enable(USART2, TRUE);
+        }
+#endif
+
+        // 刚才那个 0x00 可能让卡片停在半帧状态，做一次热复位重新对齐，
+        // 顺便验证"复位->ATR"这条链路可以重复工作。
+        if (tx_ok_cfg >= 0) {
+            data[0] = 0;
+            ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
+            SpinDelay(10);
+            data[0] = 1;
+            ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
+
+            uint8_t warm_len = 0;
+            uint32_t warm_idle = GetTicks();
+            while (1) {
+                if (usart_flag_get(USART2, USART_RDBF_FLAG) != RESET) {
+                    uint8_t wb = (uint8_t) usart_data_receive(USART2);
+                    if (warm_len < sizeof(atr)) {
+                        atr[warm_len++] = wb;
+                    }
+                    warm_idle = GetTicks();
+                    continue;
+                }
+                if (GetTicksDelta(warm_idle) > 30000) {
+                    break;
+                }
+            }
+            dxl_print_dbg("Warm reset ATR (%u bytes):", warm_len);
+            for (uint8_t i = 0; i < warm_len; ++i) {
+                dxl_print_dbg(" %02x", atr[i]);
+            }
+            dxl_print_dbg("\n");
+
+            usart_flag_clear(USART2, USART_PERR_FLAG | USART_FERR_FLAG |
+                             USART_NERR_FLAG | USART_ROERR_FLAG | USART_TDC_FLAG);
+            SpinDelay(50);
+        }
+
+        // ------------------------------------------------------------------
+        // ATR 之后的通用 APDU 交互测试
+        // 说明：这张卡的 ATR 中没有 TD1，按 ISO7816-3 默认使用 T=0 协议。
+        // 下面全部是只读、无副作用的通用指令（不做 VERIFY、不写任何文件），
+        // 只用来验证 "ATR 之外" 的双向收发链路是否完整正常。
+        // 其中只有 SELECT 会改变卡片当前选中状态，下一次上电/复位即恢复。
+        // ------------------------------------------------------------------
+        {
+            // 候选应用标识，社保卡/金融 IC 卡常见。未安装的应用会回 6A82，属正常现象。
+            static const uint8_t aid_pse[]  = {'1', 'P', 'A', 'Y', '.', 'S', 'Y', 'S', '.', 'D', 'D', 'F', '0', '1'};
+            static const uint8_t aid_pboc[] = {0xA0, 0x00, 0x00, 0x00, 0x03, 0x20, 0x10, 0x01}; // PBOC 借贷记
+            static const uint8_t aid_up[]   = {0xA0, 0x00, 0x00, 0x03, 0x33, 0x01, 0x01, 0x01}; // UnionPay
+            static const uint8_t aid_sscd[] = {0xA0, 0x00, 0x00, 0x00, 0x63, 0x20, 0x01, 0x05}; // 行业/社保候选
+            static const uint8_t mf_id[]    = {0x3F, 0x00};
+
+            static const struct {
+                const char    *name;
+                uint8_t        cla, ins, p1, p2, le, lc;
+                const uint8_t *body;
+            } test_apdus[] = {
+                {"SELECT MF 3F00",                  0x00, 0xA4, 0x00, 0x00, 0,  2, mf_id},
+                {"GET CHALLENGE 8B",                0x00, 0x84, 0x00, 0x00, 8,  0, NULL},
+                {"READ BINARY 0000 x1",             0x00, 0xB0, 0x00, 0x00, 1,  0, NULL},
+                {"SELECT PSE 1PAY.SYS.DDF01",       0x00, 0xA4, 0x04, 0x00, 0, 14, aid_pse},
+                // PSE 的 FCI 里会给出目录文件所在的 SFI（0x88 01 01 表示 SFI=1），
+                // 用 READ RECORD 把目录记录读出来，这是"有状态多步交互"最直接的验证。
+                // P2 = (SFI << 3) | 0x04 = 0x0C；Le 先给 0，卡片回 6C xx 会自动按需重发。
+                {"READ RECORD 1 SFI1 (PSE dir)",    0x00, 0xB2, 0x01, 0x0C, 0,  0, NULL},
+                {"READ RECORD 2 SFI1 (PSE dir)",    0x00, 0xB2, 0x02, 0x0C, 0,  0, NULL},
+                {"SELECT AID A0000000032010 01",    0x00, 0xA4, 0x04, 0x00, 0,  8, aid_pboc},
+                {"SELECT AID A0000003330101 01",    0x00, 0xA4, 0x04, 0x00, 0,  8, aid_up},
+                {"SELECT AID A0000000632001 05",    0x00, 0xA4, 0x04, 0x00, 0,  8, aid_sscd},
+            };
+
+            uint8_t  apdu_rx[260]; // 记录长度可达 253，留足余量
+            uint16_t apdu_rlen;
+            uint16_t apdu_sw;
+
+            SpinDelay(10); // ATR 结束后给卡片一点处理时间
+
+            for (size_t k = 0; k < sizeof(test_apdus) / sizeof(test_apdus[0]); ++k) {
+                apdu_rlen = 0;
+                apdu_sw = sc_t0_apdu(test_apdus[k].cla, test_apdus[k].ins,
+                                     test_apdus[k].p1, test_apdus[k].p2,
+                                     test_apdus[k].body, test_apdus[k].lc, test_apdus[k].le,
+                                     apdu_rx, sizeof(apdu_rx), &apdu_rlen);
+
+                if (apdu_sw == 0xFFFF) {
+                    dxl_print_dbg("%s -> TIMEOUT, no response\n", test_apdus[k].name);
+                    continue;
+                }
+
+                dxl_print_dbg("%s -> SW=%02x%02x", test_apdus[k].name,
+                              (unsigned)(apdu_sw >> 8), (unsigned)(apdu_sw & 0xFF));
+
+                // 常见状态字的含义，便于快速判断链路与应用是否可用
+                switch (apdu_sw) {
+                    case 0x9000:
+                        dxl_print_dbg(" OK");
+                        break;
+                    case 0x6A82:
+                        dxl_print_dbg(" file/app not found");
+                        break;
+                    case 0x6A81:
+                        dxl_print_dbg(" function not supported");
+                        break;
+                    case 0x6A86:
+                        dxl_print_dbg(" wrong P1/P2");
+                        break;
+                    case 0x6985:
+                        dxl_print_dbg(" conditions not satisfied");
+                        break;
+                    case 0x6982:
+                        dxl_print_dbg(" security status not satisfied");
+                        break;
+                    case 0x6700:
+                        dxl_print_dbg(" wrong length");
+                        break;
+                    default:
+                        if ((apdu_sw & 0xFF00) == 0x6300 && (apdu_sw & 0x00FF) != 0) {
+                            dxl_print_dbg(" verify failed, retries left %u", (unsigned)(apdu_sw & 0x0F));
+                        }
+                        break;
+                }
+                dxl_print_dbg("\n");
+
+                if (apdu_rlen > 0) {
+                    dxl_print_dbg("    data (%u bytes):", apdu_rlen);
+                    for (uint16_t b = 0; b < apdu_rlen; ++b) {
+                        dxl_print_dbg(" %02x", apdu_rx[b]);
+                    }
+                    dxl_print_dbg("\n");
+                }
+            }
+        }
+
 
         // 去激活（关闭卡片）
         data[0] = 0;
