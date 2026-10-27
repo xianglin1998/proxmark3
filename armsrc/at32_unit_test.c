@@ -896,7 +896,8 @@ void test_usb_xlink_1line_uart(void) {
 
     /* configure usart1 param */
     usart_init(USART1, 57600, USART_DATA_8BITS, USART_STOP_1_BIT);
-    usart_transmitter_enable(USART1, TRUE);
+    usart_parity_selection_config(USART1, USART_PARITY_NONE); // 8 n 1
+    usart_transmitter_enable(USART1, FALSE); // 直接接收，不发送
     usart_receiver_enable(USART1, TRUE);
     usart_single_line_halfduplex_select(USART1, TRUE);
     usart_enable(USART1, TRUE);
@@ -1900,6 +1901,490 @@ void test_nvic_reset(void) {
     }
 }
 
+#ifndef SMARTCARD_SYNC_TEST
+#define SMARTCARD_SYNC_TEST 0
+#endif
+
+void test_smartcard_module(void) {
+    // 初始化I2C，等下需要拿来做状态切换
+    StartTicks();
+    I2C_init(true);
+    uint8_t smartcard_addr = 0x52;
+
+    SpinDelay(1000);
+    usb_enable(); // 要初始化USB口，printf调试大法好
+    uint8_t data[20];
+    uint8_t atr[50];
+    uint8_t atr_len = 0;
+
+    crm_periph_clock_enable(CRM_GPIOA_PERIPH_CLOCK, TRUE);
+#if !SMARTCARD_SYNC_TEST
+    crm_periph_clock_enable(CRM_TMR2_PERIPH_CLOCK, TRUE);
+    crm_periph_clock_enable(CRM_USART2_PERIPH_CLOCK, TRUE);
+#endif
+
+    gpio_init_type gpio_init_struct;
+    gpio_default_para_init(&gpio_init_struct);
+#if SMARTCARD_SYNC_TEST
+    // FM4442 has no ISO7816 ATR. Read its 32-bit synchronous reset response.
+    gpio_init_struct.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+    gpio_init_struct.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+    gpio_init_struct.gpio_mode = GPIO_MODE_OUTPUT;
+    gpio_init_struct.gpio_pins = GPIO_PINS_3;
+    gpio_init_struct.gpio_pull = GPIO_PULL_NONE;
+    gpio_init(GPIOA, &gpio_init_struct);
+    gpio_bits_reset(GPIOA, GPIO_PINS_3);
+
+    // I/O 读的时候用输入 + 上拉（和原来能正常读到 ATR 的配置一致）；
+    // 发命令时在测试流程里临时切成开漏输出，发完再切回这里。
+    gpio_init_struct.gpio_mode = GPIO_MODE_INPUT;
+    gpio_init_struct.gpio_pins = GPIO_PINS_2;
+    gpio_init_struct.gpio_pull = GPIO_PULL_UP;
+    gpio_init(GPIOA, &gpio_init_struct);
+#else
+    // TMR2 drives TDA8035 CLK input; its divide-by-2 output clocks the async card.
+    gpio_init_struct.gpio_drive_strength = GPIO_DRIVE_STRENGTH_STRONGER;
+    gpio_init_struct.gpio_out_type = GPIO_OUTPUT_OPEN_DRAIN;
+    gpio_init_struct.gpio_pull = GPIO_PULL_UP; // ISO7816 I/O line needs a pull-up resistor
+    gpio_init_struct.gpio_mode = GPIO_MODE_MUX;
+    gpio_init_struct.gpio_pins = GPIO_PINS_2;
+    gpio_init(GPIOA, &gpio_init_struct);
+    gpio_pin_mux_config(GPIOA, GPIO_PINS_SOURCE2, GPIO_MUX_7);
+
+    gpio_init_struct.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+    gpio_init_struct.gpio_pins = GPIO_PINS_3;
+    gpio_init_struct.gpio_pull = GPIO_PULL_NONE;
+    gpio_init(GPIOA, &gpio_init_struct);
+    gpio_pin_mux_config(GPIOA, GPIO_PINS_SOURCE3, GPIO_MUX_1);
+
+    // ISO7816 default F/D=372: 3.6 MHz / 372 ~= 9677 baud.
+    usart_init(USART2, 9677, USART_DATA_9BITS, USART_STOP_1_5_BIT);
+    usart_parity_selection_config(USART2, USART_PARITY_EVEN);
+    usart_smartcard_guard_time_set(USART2, 2);
+    usart_smartcard_mode_enable(USART2, TRUE);
+    usart_smartcard_nack_set(USART2, TRUE);
+    usart_single_line_halfduplex_select(USART2, TRUE);
+    usart_transmitter_enable(USART2, TRUE);
+    usart_receiver_enable(USART2, TRUE);
+    usart_enable(USART2, TRUE);
+
+    tmr_internal_clock_set(TMR2);
+    tmr_reset(TMR2);
+    tmr_base_init(TMR2, 39, 0); // 288 MHz / 40 = 7.2 MHz at TDA8035 CLK input
+    tmr_output_config_type tmr_output_struct;
+    tmr_output_default_para_init(&tmr_output_struct);
+    tmr_output_struct.oc_mode = TMR_OUTPUT_CONTROL_PWM_MODE_A;
+    tmr_output_struct.oc_polarity = TMR_OUTPUT_ACTIVE_HIGH;
+    tmr_output_struct.oc_output_state = TRUE;
+    tmr_output_channel_config(TMR2, TMR_SELECT_CHANNEL_4, &tmr_output_struct);
+    tmr_channel_value_set(TMR2, TMR_SELECT_CHANNEL_4, 20);
+    tmr_counter_enable(TMR2, TRUE);
+#endif
+
+    while (1) {
+        while (is_btn_pressed()) { } // 等待松开按钮
+        dxl_print_dbg("按下按钮开始测试 智能卡模块 > \r\n");
+        while (!is_btn_pressed()) { } // 等待按下按钮
+        while (is_btn_pressed()) { } // 等待松开按钮
+
+        // 设置供电电压（写周期不稳时可以把 1 改成 2 切到 5v）
+        data[0] = 1; // 0 表示切换到 1.8v，1 表示切换到3v，2 表示切换到5v
+        bool ret = I2C_BufferWrite(data, 1, 0x01, smartcard_addr << 1);
+        dxl_print_dbg("Set smartcard voltage to %s, Write %s\n",
+            data[0] == 0 ? "1.8v" : (data[0] == 1 ? "3v" : "5v"),
+            ret ? "success" : "failed");
+
+#if SMARTCARD_SYNC_TEST
+
+        // ---------------- FM4442 同步卡测试 ----------------
+        // 复位/ATR 部分保持原来已经验证可用的写法，一个字都没动。
+        // 命令部分按 SLE4432/4442 手册 2.2~2.5 节实现：
+        //   1. 每字节 LSB 先发，I/O 在 CLK 低电平期间改变，卡片在 CLK 上升沿采样
+        //   2. 命令 = START(CLK 高时 I/O 下降) + 3 字节 + 1 个附加时钟 + STOP(CLK 高时 I/O 上升)
+        //   3. 读命令后必须补足 m 个时钟，否则卡片停在 outgoing data 模式，后面的 START 会被丢弃
+        //   4. 写命令进入 processing 模式：卡片先把 I/O 拉低，处理完释放成高阻 Z，据此判断结束
+        //   5. 改数据前必须先过 PSC 认证，否则 38H 写命令被静默忽略（这是之前读回 0xFF 的根因）
+        //   6. CLK 7~50kHz，高/低电平各 >= 9us，这里用 12us（约 41.7kHz）
+        uint8_t  fm_cmd[13][3];  // 命令 3 字节
+        uint8_t  fm_kind[13];    // 0 = processing（写），1 = 读
+        uint8_t  fm_nb[13];      // 读命令采样字节数
+        uint16_t fm_pad[13];     // 读命令总共需要的时钟数 m
+        uint8_t  fm_exp[13];     // 期望值，0xFF 表示不比较
+        uint8_t  fm_res[13][4];  // 读回结果
+        uint8_t  fm_n;           // 本遍事务条数
+        uint8_t  fm_ec;          // 错误计数器
+        uint8_t  fm_old = 0xFF;  // 主存储区 [0x20] 原值
+        uint8_t  fm_pat[3];
+        bool     fm_low_seen;
+        bool     fm_done;
+        uint16_t fm_k;
+
+        // 命令帧时钟数：手册规定是 24bit + 1 个附加时钟后接 STOP（共 25 个时钟）。
+        // 如果某批卡片实测写不进去，把这里改成 true，会在 STOP 前再补一个时钟（共 26 个）。
+        const bool fm_extra_clk = false;
+
+        // Select fXTAL (no divider): XTAL1 directly clocks the FM4442.
+        data[0] = 3;
+        ret = I2C_BufferWrite(data, 1, 0x05, smartcard_addr << 1);
+        dxl_print_dbg("Set smartcard clock to %s, Write %s\n",
+            data[0] == 0 ? "fXTAL/8" : (data[0] == 1 ? "fXTAL/4" : (data[0] == 2 ? "fXTAL/2" : "fXTAL")),
+            ret ? "success" : "failed");
+
+        // Hold reset low while activating the card, with the external clock low.
+        data[0] = 0;
+        ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
+        data[0] = 1;
+        ret = I2C_BufferWrite(data, 1, 0x02, smartcard_addr << 1);
+        dxl_print_dbg("Activate synchronous card: %s\n", ret ? "success" : "failed");
+        SpinDelay(10);
+
+        for (uint8_t bit = 0; bit < 15; ++bit) {
+            gpio_bits_set(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);
+            gpio_bits_reset(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);
+        }
+
+        // while (1) {} // TODO 测试
+
+        // A rising reset edge initializes the FM4442 address and exposes DO0.
+        data[0] = 1;
+        ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
+        SpinDelayUsPrecision(12);
+
+        // gpio_bits_set(GPIOA, GPIO_PINS_3);
+        // SpinDelayUsPrecision(12);
+        // gpio_bits_reset(GPIOA, GPIO_PINS_3);
+        // SpinDelayUsPrecision(12);
+
+        gpio_bits_set(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);
+        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);
+
+        data[0] = 0;
+        ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
+        SpinDelayUsPrecision(12);
+
+        // FM4442 synchronous reset response is 32 bits, LSB first, MSB last.
+
+        memset(atr, 0, sizeof(atr));
+        atr_len = 0;
+        for (uint8_t bit = 0; bit < 32; ++bit) {
+            if (GpioInputStatus(GPIOA, GPIO_PINS_2)) {
+                atr[bit / 8] |= (uint8_t)(1u << (bit % 8));
+            }
+            if ((bit & 7u) == 7u) {
+                ++atr_len;
+            }
+            gpio_bits_set(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);
+            gpio_bits_reset(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);
+        }
+
+        dxl_print_dbg("FM4442 synchronous reset response:");
+        for (uint8_t i = 0; i < atr_len; ++i) {
+            dxl_print_dbg(" %02x", atr[i]);
+        }
+        dxl_print_dbg("\n");
+
+        // 手册：第 33 个时钟把 I/O 释放成高阻 Z，ATR 结束、卡片进入命令模式
+        gpio_bits_set(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);
+        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);
+
+        // ---- 第一条命令：READ SECURITY MEMORY (31H)，先拿到错误计数器 ----
+        // 命令发送：I/O 切成开漏输出，写 1 即释放总线（板上有上拉）
+        gpio_init_struct.gpio_mode = GPIO_MODE_OUTPUT;
+        gpio_init_struct.gpio_out_type = GPIO_OUTPUT_OPEN_DRAIN;
+        gpio_init_struct.gpio_pull = GPIO_PULL_UP;
+        gpio_init_struct.gpio_pins = GPIO_PINS_2;
+        gpio_init(GPIOA, &gpio_init_struct);
+        gpio_bits_set(GPIOA, GPIO_PINS_2);
+        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);                   // t1: START 前 I/O 高电平 >= 10us
+        gpio_bits_set(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);
+        gpio_bits_reset(GPIOA, GPIO_PINS_2);        // START: CLK 高时 I/O 下降
+        SpinDelayUsPrecision(12);                   // t3
+        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);
+
+        fm_cmd[0][0] = 0x31;
+        fm_cmd[0][1] = 0x00;
+        fm_cmd[0][2] = 0x00;
+        for (uint8_t bi = 0; bi < 3; ++bi) {
+            for (uint8_t bit = 0; bit < 8; ++bit) {
+                if ((fm_cmd[0][bi] >> bit) & 1u) {
+                    gpio_bits_set(GPIOA, GPIO_PINS_2);
+                } else {
+                    gpio_bits_reset(GPIOA, GPIO_PINS_2);
+                }
+                SpinDelayUsPrecision(12);           // t4: 建立时间
+                gpio_bits_set(GPIOA, GPIO_PINS_3);
+                SpinDelayUsPrecision(12);
+                gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                SpinDelayUsPrecision(12);
+            }
+        }
+
+        if (fm_extra_clk) {                         // 可选：再多一个时钟
+            gpio_bits_set(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);
+            gpio_bits_reset(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);
+        }
+        gpio_bits_reset(GPIOA, GPIO_PINS_2);        // CLK 低时先拉低 I/O
+        SpinDelayUsPrecision(12);                   // t5
+        gpio_bits_set(GPIOA, GPIO_PINS_3);          // 附加时钟（第 25 个）
+        SpinDelayUsPrecision(12);
+        gpio_bits_set(GPIOA, GPIO_PINS_2);          // STOP: CLK 高时 I/O 上升
+        SpinDelayUsPrecision(12);                   // t6
+        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+        SpinDelayUsPrecision(12);
+
+        // 接收：I/O 切回输入（原来 ATR 就是这么读的）
+        gpio_init_struct.gpio_mode = GPIO_MODE_INPUT;
+        gpio_init_struct.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+        gpio_init_struct.gpio_pull = GPIO_PULL_UP;
+        gpio_init_struct.gpio_pins = GPIO_PINS_2;
+        gpio_init(GPIOA, &gpio_init_struct);
+        SpinDelayUsPrecision(12);
+
+        memset(fm_res[0], 0, sizeof(fm_res[0]));
+        for (fm_k = 0; fm_k < 33; ++fm_k) {         // 32 个数据时钟 + 1 个归位时钟
+            gpio_bits_reset(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);               // t7: 下降沿后数据有效
+            if (fm_k < 32 && GpioInputStatus(GPIOA, GPIO_PINS_2)) {
+                fm_res[0][fm_k >> 3] |= (uint8_t)(1u << (fm_k & 7));
+            }
+            gpio_bits_set(GPIOA, GPIO_PINS_3);
+            SpinDelayUsPrecision(12);
+        }
+        fm_ec = fm_res[0][0] & 0x07;
+        dxl_print_dbg("Security memory: EC=0x%02x ref=%02x %02x %02x (未认证时参考字节读回 00)\n",
+                      fm_ec, fm_res[0][1], fm_res[0][2], fm_res[0][3]);
+
+        // ---- 事务表：第一遍做 PSC 认证 + 复查 + 读原值，第二遍写数据并回读 ----
+        for (uint8_t pass = 0; pass < 2; ++pass) {
+            fm_n = 0;
+
+            if (pass == 0) {
+                // 读保护存储区（34H）：32 个保护位，1 表示对应字节已锁定、不可再改写
+                fm_cmd[fm_n][0] = 0x34; fm_cmd[fm_n][1] = 0x00; fm_cmd[fm_n][2] = 0x00;
+                fm_kind[fm_n] = 1; fm_nb[fm_n] = 4; fm_pad[fm_n] = 33; fm_exp[fm_n] = 0xFF; ++fm_n;
+
+                if (fm_ec >= 0x04) {
+                    // PSC 认证 5 步：消耗一个错误计数位 -> 比较 3 个参考字节 -> 清错误计数器
+                    fm_cmd[fm_n][0] = 0x39; fm_cmd[fm_n][1] = 0x00; fm_cmd[fm_n][2] = (uint8_t)(fm_ec & 0x06);
+                    fm_kind[fm_n] = 0; fm_exp[fm_n] = 0xFF; ++fm_n;
+                    fm_cmd[fm_n][0] = 0x33; fm_cmd[fm_n][1] = 0x01; fm_cmd[fm_n][2] = 0xFF;
+                    fm_kind[fm_n] = 0; fm_exp[fm_n] = 0xFF; ++fm_n;
+                    fm_cmd[fm_n][0] = 0x33; fm_cmd[fm_n][1] = 0x02; fm_cmd[fm_n][2] = 0xFF;
+                    fm_kind[fm_n] = 0; fm_exp[fm_n] = 0xFF; ++fm_n;
+                    fm_cmd[fm_n][0] = 0x33; fm_cmd[fm_n][1] = 0x03; fm_cmd[fm_n][2] = 0xFF;
+                    fm_kind[fm_n] = 0; fm_exp[fm_n] = 0xFF; ++fm_n;
+                    fm_cmd[fm_n][0] = 0x39; fm_cmd[fm_n][1] = 0x00; fm_cmd[fm_n][2] = 0xFF;
+                    fm_kind[fm_n] = 0; fm_exp[fm_n] = 0xFF; ++fm_n;
+                } else {
+                    dxl_print_dbg("PSC verify skipped: error counter nearly exhausted (EC=0x%02x)\n", fm_ec);
+                }
+
+                // 复查安全存储区：EC 回到 0x07 说明认证成功
+                fm_cmd[fm_n][0] = 0x31; fm_cmd[fm_n][1] = 0x00; fm_cmd[fm_n][2] = 0x00;
+                fm_kind[fm_n] = 1; fm_nb[fm_n] = 4; fm_pad[fm_n] = 33; fm_exp[fm_n] = 0xFF; ++fm_n;
+
+                // 读主存储区 [0x20] 原值（手册要求改数据前必须先读），m=(256-32)*8+1
+                fm_cmd[fm_n][0] = 0x30; fm_cmd[fm_n][1] = 0x20; fm_cmd[fm_n][2] = 0x00;
+                fm_kind[fm_n] = 1; fm_nb[fm_n] = 1; fm_pad[fm_n] = 1793; fm_exp[fm_n] = 0xFF; ++fm_n;
+            } else {
+                // 写 0x5A / 0xA5 / 原值，每次写完立即回读校验
+                fm_pat[0] = 0x5A;
+                fm_pat[1] = 0xA5;
+                fm_pat[2] = fm_old;
+                for (uint8_t p = 0; p < 3; ++p) {
+                    fm_cmd[fm_n][0] = 0x38; fm_cmd[fm_n][1] = 0x20; fm_cmd[fm_n][2] = fm_pat[p];
+                    fm_kind[fm_n] = 0; fm_exp[fm_n] = 0xFF; ++fm_n;
+
+                    fm_cmd[fm_n][0] = 0x30; fm_cmd[fm_n][1] = 0x20; fm_cmd[fm_n][2] = 0x00;
+                    fm_kind[fm_n] = 1; fm_nb[fm_n] = 1; fm_pad[fm_n] = 1793; fm_exp[fm_n] = fm_pat[p]; ++fm_n;
+                }
+            }
+
+            for (uint8_t i = 0; i < fm_n; ++i) {
+                // ---- 发送 3 字节命令 ----
+                gpio_init_struct.gpio_mode = GPIO_MODE_OUTPUT;
+                gpio_init_struct.gpio_out_type = GPIO_OUTPUT_OPEN_DRAIN;
+                gpio_init_struct.gpio_pull = GPIO_PULL_UP;
+                gpio_init_struct.gpio_pins = GPIO_PINS_2;
+                gpio_init(GPIOA, &gpio_init_struct);
+                gpio_bits_set(GPIOA, GPIO_PINS_2);
+                gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                SpinDelayUsPrecision(12);               // t1
+                gpio_bits_set(GPIOA, GPIO_PINS_3);
+                SpinDelayUsPrecision(12);
+                gpio_bits_reset(GPIOA, GPIO_PINS_2);    // START
+                SpinDelayUsPrecision(12);               // t3
+                gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                SpinDelayUsPrecision(12);
+
+                for (uint8_t bi = 0; bi < 3; ++bi) {
+                    for (uint8_t bit = 0; bit < 8; ++bit) {
+                        if ((fm_cmd[i][bi] >> bit) & 1u) {
+                            gpio_bits_set(GPIOA, GPIO_PINS_2);
+                        } else {
+                            gpio_bits_reset(GPIOA, GPIO_PINS_2);
+                        }
+                        SpinDelayUsPrecision(12);       // t4
+                        gpio_bits_set(GPIOA, GPIO_PINS_3);
+                        SpinDelayUsPrecision(12);
+                        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                        SpinDelayUsPrecision(12);
+                    }
+                }
+
+                if (fm_extra_clk) {                     // 可选：再多一个时钟
+                    gpio_bits_set(GPIOA, GPIO_PINS_3);
+                    SpinDelayUsPrecision(12);
+                    gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                    SpinDelayUsPrecision(12);
+                }
+                gpio_bits_reset(GPIOA, GPIO_PINS_2);    // CLK 低时先拉低 I/O
+                SpinDelayUsPrecision(12);               // t5
+                gpio_bits_set(GPIOA, GPIO_PINS_3);      // 附加时钟（第 25 个）
+                SpinDelayUsPrecision(12);
+                gpio_bits_set(GPIOA, GPIO_PINS_2);      // STOP：CLK 高时 I/O 上升
+                SpinDelayUsPrecision(12);               // t6
+                gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                SpinDelayUsPrecision(12);
+
+                // ---- 切回输入接收应答 ----
+                gpio_init_struct.gpio_mode = GPIO_MODE_INPUT;
+                gpio_init_struct.gpio_out_type = GPIO_OUTPUT_PUSH_PULL;
+                gpio_init_struct.gpio_pull = GPIO_PULL_UP;
+                gpio_init_struct.gpio_pins = GPIO_PINS_2;
+                gpio_init(GPIOA, &gpio_init_struct);
+                SpinDelayUsPrecision(12);
+
+                memset(fm_res[i], 0, sizeof(fm_res[i]));
+                fm_low_seen = false;
+                fm_done = false;
+
+                if (fm_kind[i] == 0) {
+                    // processing：卡片先把 I/O 拉低，处理完释放成高阻 Z
+                    for (fm_k = 0; fm_k < 1200; ++fm_k) {
+                        gpio_bits_set(GPIOA, GPIO_PINS_3);
+                        SpinDelayUsPrecision(12);
+                        if (!GpioInputStatus(GPIOA, GPIO_PINS_2)) {
+                            fm_low_seen = true;
+                        }
+                        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                        SpinDelayUsPrecision(12);
+                        if (fm_low_seen && GpioInputStatus(GPIOA, GPIO_PINS_2)) {
+                            fm_done = true;
+                            break;
+                        }
+                    }
+                    dxl_print_dbg("[%u] cmd %02x %02x %02x -> processing %s "
+                                  "(I/O %s, %u clocks)\n",
+                                  i, fm_cmd[i][0], fm_cmd[i][1], fm_cmd[i][2],
+                                  fm_done ? "done" : "TIMEOUT",
+                                  fm_low_seen ? "pulled low" : "stayed high - command REJECTED",
+                                  (unsigned)fm_k);
+                } else {
+                    // outgoing data：第 k 个下降沿后第 k 个 bit 有效，采够后继续补时钟把卡片送回命令模式
+                    for (fm_k = 0; fm_k < fm_pad[i]; ++fm_k) {
+                        gpio_bits_reset(GPIOA, GPIO_PINS_3);
+                        SpinDelayUsPrecision(12);       // t7
+                        if (fm_k < (uint16_t)fm_nb[i] * 8 && GpioInputStatus(GPIOA, GPIO_PINS_2)) {
+                            fm_res[i][fm_k >> 3] |= (uint8_t)(1u << (fm_k & 7));
+                        }
+                        gpio_bits_set(GPIOA, GPIO_PINS_3);
+                        SpinDelayUsPrecision(12);
+                    }
+
+                    if (fm_cmd[i][0] == 0x31) {
+                        dxl_print_dbg("[%u] cmd %02x %02x %02x -> EC=0x%02x ref=%02x %02x %02x -> %s\n",
+                                      i, fm_cmd[i][0], fm_cmd[i][1], fm_cmd[i][2],
+                                      fm_res[i][0] & 0x07, fm_res[i][1], fm_res[i][2], fm_res[i][3],
+                                      ((fm_res[i][0] & 0x07) == 0x07) ? "PSC verified" : "PSC NOT verified");
+                    } else if (fm_cmd[i][0] == 0x34) {
+                        dxl_print_dbg("[%u] protection memory: %02x %02x %02x %02x "
+                                      "(bit=1 表示该字节已锁定)\n",
+                                      i, fm_res[i][0], fm_res[i][1], fm_res[i][2], fm_res[i][3]);
+                    } else if (pass == 0) {
+                        // 第一遍：只记录原值，不做比较
+                        fm_old = fm_res[i][0];
+                        dxl_print_dbg("[%u] cmd %02x %02x %02x -> original [0x20]=0x%02x\n",
+                                      i, fm_cmd[i][0], fm_cmd[i][1], fm_cmd[i][2], fm_res[i][0]);
+                    } else {
+                        dxl_print_dbg("[%u] cmd %02x %02x %02x -> write 0x%02x, readback 0x%02x -> %s\n",
+                                      i, fm_cmd[i][0], fm_cmd[i][1], fm_cmd[i][2],
+                                      fm_exp[i], fm_res[i][0],
+                                      (fm_res[i][0] == fm_exp[i]) ? "PASS" : "FAIL");
+                    }
+                }
+            }
+        }
+
+        data[0] = 0;
+        ret = I2C_BufferWrite(data, 1, 0x02, smartcard_addr << 1);
+        dxl_print_dbg("Deactivate synchronous card: %s\n", ret ? "success" : "failed");
+#else
+        // Restore the async card's clock and serial-interface path.
+        // (The PWM and USART are configured above for this build mode.)
+
+        // 设置时钟频率，0=fXTAL/8，1=fXTAL/4，2=fXTAL/2，3=fXTAL
+        data[0] = 2;
+        ret = I2C_BufferWrite(data, 1, 0x05, smartcard_addr << 1);
+        dxl_print_dbg("Set smartcard clock to %s, Write %s\n",
+            data[0] == 0 ? "fXTAL/8" : (data[0] == 1 ? "fXTAL/4" : (data[0] == 2 ? "fXTAL/2" : "fXTAL")),
+            ret ? "success" : "failed");
+
+        // Keep RST low while powering the card and starting its clock.
+        data[0] = 0;
+        ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
+
+        // 1 表示激活卡片，0 表示关闭卡片
+        data[0] = 1;
+        ret = I2C_BufferWrite(data, 1, 0x02, smartcard_addr << 1);
+        dxl_print_dbg("Activate smartcard: %s\n", ret ? "success" : "failed");
+        SpinDelay(10); // 等待10ms，确保卡片已经激活
+
+        // ISO7816 ATR starts on the rising edge of RST; keep RST high while receiving.
+        data[0] = 1;
+        ret = I2C_BufferWrite(data, 1, 0x04, smartcard_addr << 1);
+
+        // 读取ATR数据
+        atr_len = 0;
+        while (1) {
+            if (usart_flag_get(USART2, USART_RDBF_FLAG) != RESET) {
+                uint8_t rx_data = usart_data_receive(USART2);
+                if (atr_len < sizeof(atr)) {
+                    atr[atr_len++] = rx_data;
+                }
+            }
+
+            if (is_btn_pressed()) {
+                break;
+            }
+        }
+        dxl_print_dbg("ATR received (%u bytes):", atr_len);
+        for (uint8_t i = 0; i < atr_len; ++i) {
+            dxl_print_dbg(" %02x", atr[i]);
+        }
+        dxl_print_dbg("\n");
+
+        // 去激活（关闭卡片）
+        data[0] = 0;
+        ret = I2C_BufferWrite(data, 1, 0x02, smartcard_addr << 1);
+        dxl_print_dbg("Deactivate smartcard: %s\n", ret ? "success" : "failed");
+#endif
+    }
+}
+
 // 覆盖 UnitTestMain 实现单元测试
 void UnitTestMain(void);
 
@@ -1927,6 +2412,9 @@ void UnitTestMain(void) {
     // 不然的话调试的时候也会很发热
     SpinDelay(500);
     FpgaWriteConfWord(FPGA_MAJOR_MODE_OFF);
+
+    // ------------------------------- 测试 智能卡模块 -------------------------------
+    test_smartcard_module();
 
     // ------------------------------- 测试 NVIC 系统复位 -------------------------------
     // test_nvic_reset();
