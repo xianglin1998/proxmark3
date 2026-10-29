@@ -1902,7 +1902,7 @@ void test_nvic_reset(void) {
 }
 
 #ifndef SMARTCARD_SYNC_TEST
-#define SMARTCARD_SYNC_TEST 1
+#define SMARTCARD_SYNC_TEST 0
 #endif
 
 #if !SMARTCARD_SYNC_TEST
@@ -1934,6 +1934,11 @@ void test_nvic_reset(void) {
 #define SC_RX_TIMEOUT_TICKS 225000u  // 150ms，T=0 的 work waiting time
 #define SC_TX_TIMEOUT_TICKS 75000u   // 50ms，留足 TC1 大保护时间的余量
 #define SC_TICK_US(ticks)  ((uint32_t)(ticks) * 2u / 3u)
+
+// eSIM / 转接卡信号不稳时，可以先 -DSC_HW_NACK=0 关掉硬件 NACK 排查。
+#ifndef SC_HW_NACK
+#define SC_HW_NACK 1
+#endif
 
 // ISO/IEC 7816-3 表 7/8：TA1 的高/低半字节分别是 Fi/Di 的索引。
 static const uint16_t sc_fi_tab[16] = {372, 372, 558, 744, 1116, 1488, 1860, 0,
@@ -1979,7 +1984,7 @@ static void sc_usart_init(uint32_t baud) {
     usart_receiver_enable(SC_USART, TRUE);
     usart_enable(SC_USART, TRUE);
     // 与 AT32 参考例程一致：UEN 之后再开 NACK / SmartCard 模式。
-    usart_smartcard_nack_set(SC_USART, TRUE);
+    usart_smartcard_nack_set(SC_USART, SC_HW_NACK ? TRUE : FALSE);
     usart_smartcard_mode_enable(SC_USART, TRUE);
 }
 
@@ -2206,7 +2211,7 @@ static uint32_t sc_measure_char_ticks(void) {
     return 0;
 }
 
-#define SC_ATR_IDLE_TICKS 45000u // 30ms 无数据判定 ATR 结束
+#define SC_ATR_IDLE_TICKS 150000u // 100ms 无数据判定 ATR 结束（eSIM/转接卡可能较慢）
 
 static uint8_t sc_read_atr(uint8_t *atr, uint8_t max_len) {
     uint8_t n = 0;
@@ -2223,6 +2228,57 @@ static uint8_t sc_read_atr(uint8_t *atr, uint8_t max_len) {
         if (GetTicksDelta(idle) > SC_ATR_IDLE_TICKS) {
             break;
         }
+    }
+    return n;
+}
+
+static void sc_print_uart_status(void) {
+    dxl_print_dbg("  UART sts=0x%03x (PERR=%d FERR=%d NERR=%d ROVER=%d) I/O=%d\n",
+                  (unsigned) SC_USART->sts,
+                  (SC_USART->sts & USART_PERR_FLAG) ? 1 : 0,
+                  (SC_USART->sts & USART_FERR_FLAG) ? 1 : 0,
+                  (SC_USART->sts & USART_NERR_FLAG) ? 1 : 0,
+                  (SC_USART->sts & USART_ROERR_FLAG) ? 1 : 0,
+                  GpioInputStatus(SC_IO_PORT, SC_IO_PIN));
+}
+
+// 上电/复位并读 ATR。voltage: 0=1.8V, 1=3V, 2=5V。
+// measure_gt 只在第一次尝试时打开：0x00 探测字符可能干扰 eSIM/转接卡。
+static uint8_t sc_activate_read_atr(uint8_t addr, uint8_t voltage, bool measure_gt,
+                                    uint8_t *atr, uint8_t max_len) {
+    sc_reg_write(addr, 0x01, voltage);
+    sc_reg_write(addr, 0x04, 0); // RST low
+    sc_reg_write(addr, 0x02, 1); // activate
+    SpinDelay(50);
+
+    if (measure_gt) {
+        sc_set_guard_time(0);
+        uint32_t gt0 = sc_measure_char_ticks();
+        sc_set_guard_time(2);
+        uint32_t gt2 = sc_measure_char_ticks();
+        if (gt0 && gt2 && gt2 > gt0) {
+            uint32_t d = gt2 - gt0;
+            dxl_print_dbg("Guard time: GT=0 %u ticks (%u us), GT=2 %u ticks (%u us), delta=%u ticks (%u us)\n",
+                          gt0, SC_TICK_US(gt0), gt2, SC_TICK_US(gt2), d, SC_TICK_US(d));
+            dxl_print_dbg("  2 etu @ 9677bps = 207us -> hardware GT %s\n",
+                          (d > 150) ? "active" : "NOT visible");
+        } else {
+            dxl_print_dbg("Guard time: measurement failed (GT=0 %u, GT=2 %u)\n", gt0, gt2);
+        }
+    }
+
+    sc_rx_flush();
+    sc_reg_write(addr, 0x04, 1); // RST high
+    memset(atr, 0, max_len);
+    uint8_t n = sc_read_atr(atr, max_len);
+
+    dxl_print_dbg("ATR received (%u bytes):", n);
+    for (uint8_t i = 0; i < n; ++i) {
+        dxl_print_dbg(" %02x", atr[i]);
+    }
+    dxl_print_dbg("\n");
+    if (n < 2) {
+        sc_print_uart_status();
     }
     return n;
 }
@@ -3273,42 +3329,31 @@ void test_smartcard_module(void) {
         ret = sc_reg_write(sc_addr, 0x05, 2); // 3.6MHz -> 9677bps @ F/D=372
         dxl_print_dbg("Set smartcard clock to fXTAL/2 (3.6MHz): %s\n", ret ? "success" : "failed");
 
-        // RST 保持低电平，先给卡片上电和时钟。
-        ret = sc_reg_write(sc_addr, 0x04, 0);
-        ret = sc_reg_write(sc_addr, 0x02, 1);
-        dxl_print_dbg("Activate smartcard: %s\n", ret ? "success" : "failed");
-        SpinDelay(10);
+        // 第一次：3V 上电 + 硬件 GT 自检。
+        dxl_print_dbg("Activate smartcard at 3v...\n");
+        atr_len = sc_activate_read_atr(sc_addr, 1, true, atr, sizeof(atr));
 
-        // ---- 硬件 GT 自检：卡片在复位状态，I/O 不会被卡片驱动 ----
-        sc_set_guard_time(0);
-        uint32_t gt0_ticks = sc_measure_char_ticks();
-        sc_set_guard_time(2);
-        uint32_t gt2_ticks = sc_measure_char_ticks();
-        if (gt0_ticks && gt2_ticks && gt2_ticks > gt0_ticks) {
-            uint32_t gt_delta = gt2_ticks - gt0_ticks;
-            dxl_print_dbg("Guard time: GT=0 %u ticks (%u us), GT=2 %u ticks (%u us), delta=%u ticks (%u us)\n",
-                          gt0_ticks, SC_TICK_US(gt0_ticks),
-                          gt2_ticks, SC_TICK_US(gt2_ticks),
-                          gt_delta, SC_TICK_US(gt_delta));
-            dxl_print_dbg("  2 etu @ 9677bps = 207us -> hardware GT %s\n",
-                          (gt_delta > 150) ? "active" : "NOT visible");
-        } else {
-            dxl_print_dbg("Guard time: measurement failed (GT=0 %u, GT=2 %u)\n", gt0_ticks, gt2_ticks);
+        // 第二次：同一电压，跳过 GT 自检，排除 0x00 探测字符对 eSIM 的干扰。
+        if (atr_len < 2) {
+            dxl_print_dbg("Retry at 3v without GT self-test...\n");
+            sc_reg_write(sc_addr, 0x04, 0);
+            sc_reg_write(sc_addr, 0x02, 0);
+            SpinDelay(20);
+            atr_len = sc_activate_read_atr(sc_addr, 1, false, atr, sizeof(atr));
         }
 
-        // 释放复位，接收 ATR。先清掉 GT 测量留下的回灌字节。
-        sc_rx_flush();
-        ret = sc_reg_write(sc_addr, 0x04, 1);
-        memset(atr, 0, sizeof(atr));
-        atr_len = sc_read_atr(atr, sizeof(atr));
-        dxl_print_dbg("ATR received (%u bytes):", atr_len);
-        for (uint8_t i = 0; i < atr_len; ++i) {
-            dxl_print_dbg(" %02x", atr[i]);
+        // 第三次：1.8V。很多 eSIM（MFF2）是 1.8V/3V，3V 下可能只发出 TS 就停。
+        if (atr_len < 2) {
+            dxl_print_dbg("Retry at 1.8v (eSIM)...\n");
+            sc_reg_write(sc_addr, 0x04, 0);
+            sc_reg_write(sc_addr, 0x02, 0);
+            SpinDelay(20);
+            voltage = 0;
+            atr_len = sc_activate_read_atr(sc_addr, 0, false, atr, sizeof(atr));
         }
-        dxl_print_dbg("\n");
 
         if (atr_len < 2) {
-            dxl_print_dbg("No valid ATR; check card, clock and I/O.\n");
+            dxl_print_dbg("No valid ATR; check card, voltage, clock and I/O.\n");
             sc_reg_write(sc_addr, 0x02, 0);
             continue;
         }
